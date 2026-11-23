@@ -973,6 +973,7 @@ BOOL SLHook(Class cls, SEL sel, IMP replacement, IMP *original)
     // Calendar's Day and Week views.
     SLCalendarInstall();
     SLSkinnedInstall();
+    SLPrefPaneInstall();
 
     [[NSDistributedNotificationCenter defaultCenter] addObserver:self
                                                         selector:@selector(arrowVariantChanged:)
