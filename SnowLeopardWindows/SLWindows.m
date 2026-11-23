@@ -599,6 +599,64 @@ static void SLHookTextured(void)
     orig_inactiveTextured = (void *)method_setImplementation(inactive, (IMP)sl_inactiveTextured);
 }
 
+// ---- tabs (Safari, Finder) ------------------------------------------------------------
+//
+// Safari's and Finder's tab bars are drawn from images of their own, named
+// "AW ..." in the main window and "IW ..." in others (the selected tab, the
+// others behind it, close and add buttons), made to continue Mavericks'
+// toolbar: the selected tab is the colour of the toolbar's bottom edge. 10.6's
+// toolbar ends darker, so the selected tab showed as a lighter band below it:
+// on screen the selected tab is about 175 (223 in an inactive window) where
+// 10.6's toolbar ends at 168 (216). The images are darkened by that ratio,
+// everything in them alike, so the tabs keep their relationships to each
+// other and meet 10.6's toolbar.
+
+static id (*orig_imageNamed)(id, SEL, NSString *);
+static NSImage *SLDarkenedImage(NSImage *image, CGFloat scale)
+{
+    NSImage *copy = [[NSImage alloc] initWithSize:[image size]];
+    for (NSImageRep *rep in [image representations]) {
+        NSInteger w = [rep pixelsWide], h = [rep pixelsHigh];
+        if (w <= 0 || h <= 0) { [copy release]; return image; }
+        NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:w pixelsHigh:h bitsPerSample:8
+            samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:w * 4 bitsPerPixel:32];
+        [bitmap setSize:[rep size]];
+        [NSGraphicsContext saveGraphicsState];
+        [NSGraphicsContext setCurrentContext:[NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap]];
+        [rep drawInRect:NSMakeRect(0, 0, [rep size].width, [rep size].height)];
+        [NSGraphicsContext restoreGraphicsState];
+        unsigned char *p = [bitmap bitmapData];
+        for (NSInteger i = 0; i < w * h; i++, p += 4)      // premultiplied RGBA: scale the colour
+            for (int c = 0; c < 3; c++) p[c] = (unsigned char)lround(p[c] * scale);
+        [copy addRepresentation:bitmap];
+        [bitmap release];
+    }
+    return [copy autorelease];
+}
+
+static id sl_imageNamed(id self, SEL _cmd, NSString *name)
+{
+    NSImage *image = orig_imageNamed(self, _cmd, name);
+    if (!image || ![name isKindOfClass:[NSString class]]) return image;
+    CGFloat scale;
+    if ([name hasPrefix:@"AW "]) scale = 168.0 / 175.0;
+    else if ([name hasPrefix:@"IW "]) scale = 216.0 / 223.0;
+    else return image;
+    static NSMutableDictionary *cache;
+    @synchronized ([NSImage class]) {
+        if (!cache) cache = [[NSMutableDictionary alloc] init];
+        NSImage *darkened = cache[name];
+        if (!darkened) cache[name] = darkened = SLDarkenedImage(image, scale);
+        return darkened;
+    }
+}
+
+static void SLHookTabArt(void)
+{
+    Method m = class_getClassMethod([NSImage class], @selector(imageNamed:));
+    if (m) orig_imageNamed = (void *)method_setImplementation(m, (IMP)sl_imageNamed);
+}
+
 // ---- CUIDraw ----------------------------------------------------------------------------
 
 static BOOL SLIsSnowLeopardWindowType(NSString *windowType)
@@ -656,6 +714,7 @@ static void SLSetUp(void)
     SLHookLayout();
     SLHookTitle();
     SLHookTextured();
+    SLHookTabArt();
 }
 
 static id sl_appInit(id self, SEL _cmd)
