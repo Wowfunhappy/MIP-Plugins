@@ -1,40 +1,75 @@
 //
-//  SLReminders.m
-//  Reminders' scroll bars, as if it had been made for Snow Leopard.
+//  SLSkinned.m
+//  Scroll bars that apps skin themselves, drawn for Lion's arrowless legacy
+//  scroll bars, as if they had been made for Snow Leopard.
+//
+//  Some apps subclass NSScroller to draw their own track and thumb
+//  (-drawKnobSlotInRect:highlight:, -drawKnob) for Lion's legacy scroll bars,
+//  which have no arrows, and say so by overriding +isCompatibleWithOverlayScrollers
+//  (Lion's API): Safari's sidebar (SidebarScroller: a translucent track and a
+//  light pill), Reminders (RemindersLegacyScroller: paper, or leather in its
+//  sidebar). Pre-Lion skinned scrollers don't override that, and get 10.6's
+//  treatment unchanged, arrows and all, as they did on 10.6.
+//
+//  These get Snow Leopard's layout and behaviour like any scroll bar, and the
+//  app paints its track and thumb into that layout itself. The ends - arrow
+//  buttons, and the cap at an end without arrows - are Snow Leopard's, with
+//  the app's track fading into Snow Leopard's over a short stretch before
+//  them, so it runs into the rounded end of the Aqua track instead of stopping
+//  at it. Their tracks may be translucent, so they are not opaque.
 //
 //  Reminders themes itself (an NSAppearance of its own, RemindersLeather.car),
-//  so its scroll bars would normally be left alone. They are skinned by
-//  RemindersLegacyScroller: a flat track (paper, or leather in the sidebar;
-//  -trackImage, painted by -drawKnobSlotInRect:highlight:) and a slim
-//  translucent black pill of a thumb (-drawKnob, painted into
-//  -rectForPart:NSScrollerKnob). It was drawn for Lion's arrowless legacy
-//  scroll bars and has no arrows.
-//
-//  Here it gets Snow Leopard's layout and behaviour like any scroll bar, and
-//  Reminders paints its track and thumb into that layout itself. The ends -
-//  arrow buttons, and the cap at an end without arrows - are Snow Leopard's,
-//  with Reminders' track fading into Snow Leopard's over a short stretch
-//  before them, so it runs into the rounded end of the Aqua track instead of
-//  stopping at it. In the dark sidebar the same Snow Leopard art, fade
-//  included, is turned gray and darkened into the leather's range, keeping
-//  its shading; its triangles are then darkened further, so the arrows read.
+//  so its scroll bars would otherwise be left alone (SLScrollBars.m); they are
+//  taken on here. In its dark sidebar the Snow Leopard art, fade included, is
+//  turned gray and darkened into the leather's range, keeping its shading; its
+//  triangles are then darkened further, so the arrows read.
 //
 
 #import "SLScrollBars.h"
+#import <libkern/OSAtomic.h>
 
 static Class gRemindersScroller;
 
-static const CGFloat kSLRemindersFade = 20;     // points of track over which Reminders' fades into Snow Leopard's
+static const CGFloat kSLSkinFade = 20;      // points of track over which the app's fades into Snow Leopard's
 
-BOOL SLRemindersSkinned(NSScroller *scroller)
+BOOL SLRemindersScroller(NSScroller *scroller)
 {
     return gRemindersScroller && [scroller isKindOfClass:gRemindersScroller];
 }
 
-static BOOL SLRemindersIsDark(NSScroller *scroller)
+static BOOL SLOverrides(Class cls, Class base, SEL sel, BOOL classMethod)
+{
+    Method mine = classMethod ? class_getClassMethod(cls, sel) : class_getInstanceMethod(cls, sel);
+    Method theirs = classMethod ? class_getClassMethod(base, sel) : class_getInstanceMethod(base, sel);
+    return mine && theirs && method_getImplementation(mine) != method_getImplementation(theirs);
+}
+
+BOOL SLSkinnedScroller(NSScroller *scroller)
+{
+    static CFMutableDictionaryRef verdicts;         // class -> kCFBooleanTrue / False
+    static OSSpinLock lock = OS_SPINLOCK_INIT;
+    Class cls = object_getClass(scroller);
+    if (cls == [NSScroller class]) return NO;
+    OSSpinLockLock(&lock);
+    if (!verdicts) verdicts = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
+    CFBooleanRef verdict = CFDictionaryGetValue(verdicts, cls);
+    OSSpinLockUnlock(&lock);
+    if (verdict) return verdict == kCFBooleanTrue;
+
+    const char *image = class_getImageName(cls);
+    BOOL skinned = !(image && strstr(image, "/AppKit.framework/"))
+        && SLOverrides(cls, [NSScroller class], @selector(drawKnobSlotInRect:highlight:), NO)
+        && SLOverrides(cls, [NSScroller class], @selector(isCompatibleWithOverlayScrollers), YES);
+    OSSpinLockLock(&lock);
+    CFDictionarySetValue(verdicts, cls, skinned ? kCFBooleanTrue : kCFBooleanFalse);
+    OSSpinLockUnlock(&lock);
+    return skinned;
+}
+
+static BOOL SLSkinIsDark(NSScroller *scroller)
 {
     SEL sel = @selector(isDark);
-    return [scroller respondsToSelector:sel] && ((BOOL (*)(id, SEL))objc_msgSend)(scroller, sel);
+    return SLRemindersScroller(scroller) && [scroller respondsToSelector:sel] && ((BOOL (*)(id, SEL))objc_msgSend)(scroller, sel);
 }
 
 static void SLFillWithBlend(CGContextRef ctx, CGRect rect, CGBlendMode mode, CGFloat gray)
@@ -46,9 +81,9 @@ static void SLFillWithBlend(CGContextRef ctx, CGRect rect, CGBlendMode mode, CGF
 
 // Paints `paint` (Snow Leopard art) into `rect`; in the dark scroll bar,
 // turned gray and mapped into the leather's range.
-static void SLRemindersPaint(NSScroller *scroller, CGRect rect, void (^paint)(void))
+static void SLSkinPaint(NSScroller *scroller, CGRect rect, void (^paint)(void))
 {
-    if (!SLRemindersIsDark(scroller)) { paint(); return; }
+    if (!SLSkinIsDark(scroller)) { paint(); return; }
     CGContextRef ctx = (CGContextRef)[[NSGraphicsContext currentContext] graphicsPort];
     CGContextSaveGState(ctx);
     CGContextClipToRect(ctx, rect);
@@ -120,27 +155,27 @@ static void SLRemindersDarkenTriangles(const SLState *st, NSScrollerArrow arrow,
 
 // Stands in for -[NSScroller drawArrow:highlightPart:] (SLPaintArrow): one end
 // of the scroll bar.
-void SLRemindersPaintArrow(NSScroller *scroller, const SLState *st, NSScrollerArrow arrow, NSInteger highlightPart)
+void SLSkinnedPaintArrow(NSScroller *scroller, const SLState *st, NSScrollerArrow arrow, NSInteger highlightPart)
 {
     NSRect end = SLDrawingRect(st, arrow == NSScrollerDecrementArrow ? NSScrollerDecrementLine : NSScrollerIncrementLine);
     if (NSIsEmptyRect(end)) return;
     CGContextRef ctx = (CGContextRef)[[NSGraphicsContext currentContext] graphicsPort];
     BOOL nearEnd = (arrow == NSScrollerDecrementArrow);
 
-    // The stretch of track next to this end, where Reminders' track gives way
+    // The stretch of track next to this end, where the app's track gives way
     // to Snow Leopard's: Snow Leopard's track drawn over it, from transparent
     // on the far side to opaque where the end's art begins.
     NSRect slot = SLDrawingRect(st, NSScrollerKnobSlot);
     CGFloat slotMin = st->horizontal ? NSMinX(slot) : NSMinY(slot), slotMax = st->horizontal ? NSMaxX(slot) : NSMaxY(slot);
     CGFloat edge = nearEnd ? (st->horizontal ? NSMaxX(end) : NSMaxY(end)) : (st->horizontal ? NSMinX(end) : NSMinY(end));
-    CGFloat from = nearEnd ? MIN(edge + kSLRemindersFade, slotMax) : MAX(edge - kSLRemindersFade, slotMin);
+    CGFloat from = nearEnd ? MIN(edge + kSLSkinFade, slotMax) : MAX(edge - kSLSkinFade, slotMin);
     CGFloat lo = MIN(from, edge), hi = MAX(from, edge);
     if (hi - lo >= 1) {
         NSRect fade = st->horizontal ? NSMakeRect(lo, NSMinY(slot), hi - lo, NSHeight(slot)) : NSMakeRect(NSMinX(slot), lo, NSWidth(slot), hi - lo);
         CGContextSaveGState(ctx);
         CGContextClipToRect(ctx, NSRectToCGRect(fade));
         CGContextBeginTransparencyLayerWithRect(ctx, NSRectToCGRect(fade), NULL);
-        SLRemindersPaint(scroller, NSRectToCGRect(fade), ^{ SLPaintSlot(st, slot); });
+        SLSkinPaint(scroller, NSRectToCGRect(fade), ^{ SLPaintSlot(st, slot); });
         CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
         CGGradientRef gradient = CGGradientCreateWithColorComponents(gray, (CGFloat[]){ 0, 0, 0, 1 }, NULL, 2);   // alpha 0 -> 1
         CGColorSpaceRelease(gray);
@@ -154,16 +189,14 @@ void SLRemindersPaintArrow(NSScroller *scroller, const SLState *st, NSScrollerAr
     }
 
     // Snow Leopard's own end: arrows, or the cap.
-    SLRemindersPaint(scroller, NSRectToCGRect(end), ^{ SLPaintArrow(st, arrow, highlightPart); });
-    if (SLRemindersIsDark(scroller))
+    SLSkinPaint(scroller, NSRectToCGRect(end), ^{ SLPaintArrow(st, arrow, highlightPart); });
+    if (SLSkinIsDark(scroller))
         SLRemindersDarkenTriangles(st, arrow, highlightPart, NSRectToCGRect(end));
 }
 
-void SLRemindersInstall(void)
+void SLSkinnedInstall(void)
 {
     if (![[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.reminders"]) return;
     Class cls = NSClassFromString(@"RemindersLegacyScroller");
-    if (!cls || ![cls isSubclassOfClass:[NSScroller class]] ||
-        ![cls instancesRespondToSelector:@selector(drawKnobSlotInRect:highlight:)]) return;
-    gRemindersScroller = cls;
+    if (cls && [cls isSubclassOfClass:[NSScroller class]]) gRemindersScroller = cls;
 }

@@ -99,7 +99,7 @@ static BOOL SLHasCustomAppearance(NSView *view)
 static inline BOOL SLIsLegacy(NSScroller *scroller)
 {
     return gEnabled && [scroller scrollerStyle] == NSScrollerStyleLegacy
-        && (SLRemindersSkinned(scroller) || !SLHasCustomAppearance(scroller));
+        && (SLRemindersScroller(scroller) || !SLHasCustomAppearance(scroller));
 }
 
 int SLArrowConfig(void) { return gArrowConfig; }
@@ -255,7 +255,7 @@ static void sl_oldDrawArrow(NSScroller *self, SEL _cmd, NSScrollerArrow arrow, N
 {
     if (!SLIsLegacy(self)) { SL_ORIG(oldDrawArrow)(self, _cmd, arrow, highlightPart); return; }
     SLState st = SLStateForScroller(self);
-    if (SLRemindersSkinned(self)) { SLRemindersPaintArrow(self, &st, arrow, highlightPart); return; }
+    if (SLSkinnedScroller(self)) { SLSkinnedPaintArrow(self, &st, arrow, highlightPart); return; }
     SLPaintArrow(&st, arrow, highlightPart);
 }
 
@@ -323,7 +323,8 @@ static BOOL sl_wantsUpdateLayer(NSScroller *self, SEL _cmd)
 
 static BOOL sl_isOpaque(NSScroller *self, SEL _cmd)
 {
-    if (!SLIsLegacy(self)) return SL_ORIG(isOpaque)(self, _cmd);
+    // An app's own skin may have a translucent track.
+    if (!SLIsLegacy(self) || SLSkinnedScroller(self)) return SL_ORIG(isOpaque)(self, _cmd);
     return YES;
 }
 
@@ -836,7 +837,7 @@ BOOL SLHook(Class cls, SEL sel, IMP replacement, IMP *original)
 
     // Calendar's Day and Week views.
     SLCalendarInstall();
-    SLRemindersInstall();
+    SLSkinnedInstall();
 
     [[NSDistributedNotificationCenter defaultCenter] addObserver:self
                                                         selector:@selector(arrowVariantChanged:)

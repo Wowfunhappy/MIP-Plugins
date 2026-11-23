@@ -81,8 +81,9 @@ void SLWebKitInstall(void);
 
 void SLCalendarInstall(void);       // Calendar's Day and Week views
 
-// ---- SLReminders.m ---------------------------------------------------------
+// ---- SLSkinned.m -----------------------------------------------------------
 
-void SLRemindersInstall(void);
-BOOL SLRemindersSkinned(NSScroller *scroller);     // a Reminders scroller, drawn with arrows in its own style
-void SLRemindersPaintArrow(NSScroller *scroller, const SLState *st, NSScrollerArrow arrow, NSInteger highlightPart);
+void SLSkinnedInstall(void);
+BOOL SLSkinnedScroller(NSScroller *scroller);      // an app's own skin, made for Lion's arrowless scroll bars
+BOOL SLRemindersScroller(NSScroller *scroller);    // Reminders' (taken on despite its own appearance)
+void SLSkinnedPaintArrow(NSScroller *scroller, const SLState *st, NSScrollerArrow arrow, NSInteger highlightPart);
