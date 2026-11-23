@@ -120,6 +120,16 @@ static NSControlTint SLRealControlTint(NSScroller *scroller)
     return SLHasActiveControls(scroller) ? [NSColor currentControlTint] : NSClearControlTint;
 }
 
+// A quick click on an arrow in a window's resize corner, shown pressed
+// after the fact (sl_hysteresisCheck): the scroller, which arrow, and the
+// click's own mouse-down time (to tell it from later presses).
+static struct {
+    NSScroller *scroller;       // retained while shown
+    NSInteger arrow;
+    BOOL maxEnd;
+    NSTimeInterval timestamp;
+} gCornerFlash;
+
 static SLState SLStateForScroller(NSScroller *scroller)
 {
     SLState st;
@@ -144,6 +154,10 @@ static SLState SLStateForScroller(NSScroller *scroller)
         else if (hit == NSScrollerIncrementLine) st.pressedArrow = NSScrollerIncrementArrow;
     }
     st.pressedInMaxEnd = (SL_SFLAGS2(scroller) & kSFlags2MaxEndHit) != 0;
+    if (scroller == gCornerFlash.scroller) {
+        st.pressedArrow = gCornerFlash.arrow;
+        st.pressedInMaxEnd = gCornerFlash.maxEnd;
+    }
     return st;
 }
 
@@ -332,21 +346,30 @@ static BOOL sl_isOpaque(NSScroller *self, SEL _cmd)
     return YES;
 }
 
-// With arrows at both ends, remember which pair a press (at a point in the
-// window) landed in, so the right pair lights up.
-static void SLNoteArrowPair(NSScroller *self, NSPoint pointInWindow)
+// With arrows at both ends, which pair a press (at a point in the window)
+// landed in.
+static BOOL SLPressIsInMaxEnd(NSScroller *self, NSPoint pointInWindow)
 {
-    if (!(SLIsLegacy(self) && gArrowConfig == kSLArrowsDoubleBoth && [self arrowsPosition] != NSScrollerArrowsNone)) return;
     SLState st = SLStateForScroller(self);
     NSPoint p = [self convertPoint:pointInWindow fromView:nil];
     CGFloat along = st.horizontal ? p.x : p.y;
     CGFloat length = st.horizontal ? st.bounds.size.width : st.bounds.size.height;
-    if (along > length * 0.5) SL_SFLAGS2(self) |= kSFlags2MaxEndHit; else SL_SFLAGS2(self) &= ~kSFlags2MaxEndHit;
+    return along > length * 0.5;
 }
+
+static void SLEndCornerFlash(void);
 
 static void sl_mouseDown(NSScroller *self, SEL _cmd, NSEvent *event)
 {
-    SLNoteArrowPair(self, [event locationInWindow]);
+    // A new press ends a corner click's flash (not the click itself, which
+    // arrives here once AppKit has decided it is one).
+    if (self == gCornerFlash.scroller && [event timestamp] != gCornerFlash.timestamp) SLEndCornerFlash();
+    if (SLIsLegacy(self) && gArrowConfig == kSLArrowsDoubleBoth && [self arrowsPosition] != NSScrollerArrowsNone) {
+        // Remember which of the two arrow pairs the click landed in, so the
+        // right pair lights up.
+        if (SLPressIsInMaxEnd(self, [event locationInWindow])) SL_SFLAGS2(self) |= kSFlags2MaxEndHit;
+        else SL_SFLAGS2(self) &= ~kSFlags2MaxEndHit;
+    }
     SL_ORIG(mouseDown)(self, _cmd, event);
 }
 
@@ -373,11 +396,13 @@ static void sl_mouseDown(NSScroller *self, SEL _cmd, NSEvent *event)
    wait is shortened by the time the press was already held, so repeating
    starts when it would have without the hold.
 
-   While AppKit waits, the arrow is shown pressed, as it would be on 10.6
-   from the moment the button goes down: otherwise a quick click only
-   reaches the scroller once the button is already up, and its highlight
-   comes and goes in the same pass, never seen. (A WebKit2 page's arrow is
-   drawn pressed over the page from this process: SLShowWebArrowPressed.)
+   A quick click only reaches the scroller once the button is already up,
+   and its highlight would come and go in the same pass, never seen. While
+   AppKit waits it may still become a resize, so nothing is shown then; once
+   the button comes up without moving, the arrow is shown pressed for as
+   long as it was held (at least briefly), as it would have been while held
+   on 10.6. (A WebKit2 page's arrow is drawn pressed over the page from this
+   process: SLShowWebArrowPressed.)
 
    The resize cursor goes too: AppKit shows it as an override cursor
    (+[NSCursor _setOverrideCursor:], from -[NSWindow _edgeResizingCursorUpdate:
@@ -387,6 +412,9 @@ static void sl_mouseDown(NSScroller *self, SEL _cmd, NSEvent *event)
 // As long as an arrow's own wait before repeating (gButtonDelay, 0.5 s), so a
 // short pause before dragging still resizes, and repeating still starts on time.
 static const NSTimeInterval kSLArrowHoldDelay = 0.5;
+// The shortest a corner click's arrow is shown pressed for (one held for
+// less, as clicks are, still shows for this long).
+static const NSTimeInterval kSLCornerFlashMinimum = 0.1;
 static NSTimeInterval gHeldPressDuration;      // how long a press handed to a scroller had been held
 static NSTimeInterval gHeldPressHandedOver;    // when (system uptime)
 static BOOL gHeldPressActive;                  // a handed-over press may still be down
@@ -562,6 +590,52 @@ static void SLHideWebArrowPressed(NSWindow *overlay)
     [overlay release];
 }
 
+static NSWindow *gCornerFlashOverlay;       // a WebKit2 page's, while shown
+static NSTimer *gCornerFlashTimer;
+
+static void SLEndCornerFlash(void)
+{
+    [gCornerFlashTimer invalidate];
+    [gCornerFlashTimer release];
+    gCornerFlashTimer = nil;
+    if (gCornerFlash.scroller) {
+        NSScroller *scroller = gCornerFlash.scroller;
+        gCornerFlash.scroller = nil;
+        [scroller setNeedsDisplay:YES];
+        [scroller release];
+    }
+    SLHideWebArrowPressed(gCornerFlashOverlay);
+    gCornerFlashOverlay = nil;
+}
+
+@interface SLCornerFlashTimer : NSObject
+@end
+@implementation SLCornerFlashTimer
++ (void)fire:(NSTimer *)timer { SLEndCornerFlash(); }
+@end
+
+// Shows a corner click's arrow pressed for `duration`: an NSScroller's (in its
+// own drawing: SLStateForScroller), or a WebKit2 page's (over it).
+static void SLStartCornerFlash(NSScroller *scroller, NSPoint pointInWindow, NSTimeInterval timestamp,
+                               const SLWebArrowPress *web, NSTimeInterval duration)
+{
+    SLEndCornerFlash();
+    if (scroller) {
+        NSScrollerPart part = [scroller testPart:pointInWindow];
+        gCornerFlash.scroller = [scroller retain];
+        gCornerFlash.arrow = (part == NSScrollerDecrementLine) ? NSScrollerDecrementArrow : NSScrollerIncrementArrow;
+        gCornerFlash.maxEnd = SLPressIsInMaxEnd(scroller, pointInWindow);
+        gCornerFlash.timestamp = timestamp;
+        [scroller setNeedsDisplay:YES];
+    } else if (web && web->view) {
+        gCornerFlashOverlay = SLShowWebArrowPressed(web);
+    }
+    gCornerFlashTimer = [[NSTimer timerWithTimeInterval:duration target:[SLCornerFlashTimer class] selector:@selector(fire:)
+                                               userInfo:nil repeats:NO] retain];
+    [[NSRunLoop currentRunLoop] addTimer:gCornerFlashTimer forMode:NSRunLoopCommonModes];
+    [[NSRunLoop currentRunLoop] addTimer:gCornerFlashTimer forMode:NSEventTrackingRunLoopMode];
+}
+
 // Is the mouse-down on a scroll arrow? If it is an NSScroller's, *scroller is
 // set to it; if a WebKit2 page's, *web is filled in.
 static BOOL SLEventIsOnScrollArrow(NSEvent *event, NSScroller **scroller, SLWebArrowPress *web)
@@ -591,34 +665,14 @@ static NSInteger sl_hysteresisCheck(id self, SEL _cmd, NSEvent *event, NSDate *e
         NSTimeInterval now = [[NSProcessInfo processInfo] systemUptime];
         NSTimeInterval wait = MAX(0, kSLArrowHoldDelay - (now - [event timestamp]));
 
-        // The arrow, shown pressed while the button is down (as its own
-        // tracking would show it: hit part, pair, highlighted).
-        unsigned flags = 0, flags2 = 0;
-        if (scroller) {
-            [scroller retain];
-            flags = SL_SFLAGS(scroller);
-            flags2 = SL_SFLAGS2(scroller);
-            NSScrollerPart part = [scroller testPart:[event locationInWindow]];
-            SL_SFLAGS2(scroller) = (flags2 & ~kSFlags2HitPartMask) | ((unsigned)part & kSFlags2HitPartMask);
-            SLNoteArrowPair(scroller, [event locationInWindow]);
-            [scroller highlight:YES];
-            [scroller displayIfNeeded];
-            [CATransaction flush];
-        }
-        NSWindow *webOverlay = web.view ? SLShowWebArrowPressed(&web) : nil;
-
+        [scroller retain];
         NSInteger result = SL_ORIG(hysteresisCheck)(self, _cmd, event, [NSDate dateWithTimeIntervalSinceNow:wait], distance, location);
 
-        // Back as it was: a resize leaves it alone, and a click or hold is
-        // handed to the scroller, which tracks (and highlights) it itself.
-        if (scroller) {
-            [scroller highlight:NO];
-            SL_SFLAGS(scroller) = (SL_SFLAGS(scroller) & ~kSFlagPartHit) | (flags & kSFlagPartHit);
-            SL_SFLAGS2(scroller) = (SL_SFLAGS2(scroller) & ~(kSFlags2HitPartMask | kSFlags2MaxEndHit))
-                                 | (flags2 & (kSFlags2HitPartMask | kSFlags2MaxEndHit));
-            [scroller release];
+        if (result == 0) {          // the button came up without moving: a click
+            NSTimeInterval held = [[NSProcessInfo processInfo] systemUptime] - [event timestamp];
+            SLStartCornerFlash(scroller, [event locationInWindow], [event timestamp], &web, MAX(held, kSLCornerFlashMinimum));
         }
-        SLHideWebArrowPressed(webOverlay);
+        [scroller release];
         if (result == 1) {          // expired: held still, so it goes to the scroller as a press
             gHeldPressHandedOver = [[NSProcessInfo processInfo] systemUptime];
             gHeldPressDuration = gHeldPressHandedOver - [event timestamp];
