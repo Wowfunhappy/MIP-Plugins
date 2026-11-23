@@ -32,6 +32,7 @@
 #import "SLScrollBars.h"
 #import <mach-o/dyld.h>
 #import <libkern/OSAtomic.h>
+#import <pthread.h>
 
 static Class gRemindersScroller;
 
@@ -65,12 +66,74 @@ BOOL SLSkinHandled(NSScroller *scroller)
 static Class gProScroller;
 static BOOL (*orig_pro_shouldDrawTrackEndcaps)(id, SEL);
 
-// A ProKit scroller - unless its class draws itself in its own -drawRect:
-// (Aperture's full-screen RKFullScreenBlackScroller, whose 10.6 arrows are no
-// longer in the app), which is left alone like any app's own skin.
+// Aperture's full-screen scroller (RKFullScreenBlackScroller, a ProKit
+// scroller with its own black art) still has its 10.6 drawing: arrows
+// (-drawArrow:highlight:), then track, with the cups the thumb rests in
+// (-drawKnobSlot), then thumb. It chooses between that and its Lion drawing
+// by asking +[RKGlobals isLionOrGreater] (and the scroller style), in
+// -drawRect: and again in -drawKnobSlot: from Lion on, with legacy scroll
+// bars, it draws no arrows, and rounds the track's ends with its endcap image
+// where the cups were. With 10.6's scroll bars, -drawRect: runs with
+// +isLionOrGreater answering NO - on the main thread, for that call only - so
+// all of it takes its 10.6 path. Aperture no longer has the arrow art; it is
+// in this plugin (ApertureArt/, from an Aperture that ran on 10.6),
+// registered under the names the scroller loads it by (+[NSImage
+// imageNamed:] in its +initialize).
+static Class gApertureScroller;
+static void (*orig_aperture_drawRect)(id, SEL, NSRect);
+static BOOL (*orig_aperture_isLionOrGreater)(id, SEL);
+static BOOL gApertureDrawing10_6;      // main thread only
+
+static BOOL sl_aperture_isLionOrGreater(id self, SEL _cmd)
+{
+    if (gApertureDrawing10_6 && pthread_main_np()) return NO;
+    return orig_aperture_isLionOrGreater(self, _cmd);
+}
+
+static void sl_aperture_drawRect(NSScroller *self, SEL _cmd, NSRect dirty)
+{
+    if (!(SLIsEnabled() && [self scrollerStyle] == NSScrollerStyleLegacy && pthread_main_np())) {
+        orig_aperture_drawRect(self, _cmd, dirty);
+        return;
+    }
+    // The Lion drawing flips the endcap and the bottom cups (-[NSImage
+    // setFlipped:], on the shared images) to round the track's bottom end;
+    // the 10.6 drawing expects them as they come.
+    for (NSString *name in @[ @"FSscroll-Together-Endcap-N", @"FSscroll-Apart-BottomArrowA-N", @"FSscroll-Apart-BottomArrowA-P" ])
+        [[NSImage imageNamed:name] setFlipped:NO];
+    BOOL was = gApertureDrawing10_6;
+    gApertureDrawing10_6 = YES;
+    orig_aperture_drawRect(self, _cmd, dirty);
+    gApertureDrawing10_6 = was;
+}
+
+static void SLApertureInstall(void)
+{
+    Class cls = objc_getClass("RKFullScreenBlackScroller"), globals = objc_getClass("RKGlobals");
+    Method isLion = globals ? class_getClassMethod(globals, sel_registerName("isLionOrGreater")) : NULL;
+    if (!cls || !isLion || strncmp(method_getTypeEncoding(isLion), "c", 1) != 0
+        || !class_getInstanceMethod(cls, sel_registerName("drawArrow:highlight:"))
+        || !class_getInstanceMethod(cls, sel_registerName("drawKnobSlot"))) return;
+    // Named before anything messages the class, so its +initialize finds them.
+    NSBundle *bundle = [NSBundle bundleForClass:objc_getClass("SLScrollBars")];
+    NSArray *paths = [bundle pathsForResourcesOfType:@"tiff" inDirectory:@"ApertureArt"];
+    if ([paths count] == 0) return;
+    for (NSString *path in paths) {
+        NSImage *image = [[NSImage alloc] initWithContentsOfFile:path];     // kept: a named image lives as long as its name
+        [image setName:[[path lastPathComponent] stringByDeletingPathExtension]];
+    }
+    orig_aperture_isLionOrGreater = (void *)method_setImplementation(isLion, (IMP)sl_aperture_isLionOrGreater);
+    SLHook(cls, @selector(drawRect:), (IMP)sl_aperture_drawRect, (IMP *)&orig_aperture_drawRect);
+    gApertureScroller = cls;
+}
+
+// A ProKit scroller - unless its class draws itself in its own -drawRect:,
+// which is left alone like any app's own skin (Aperture's full-screen
+// scroller is drawn as on 10.6, above).
 BOOL SLProKitScroller(NSScroller *scroller)
 {
     if (!gProScroller || ![scroller isKindOfClass:gProScroller]) return NO;
+    if (gApertureScroller && [scroller isKindOfClass:gApertureScroller]) return YES;
     return class_getMethodImplementation(object_getClass(scroller), @selector(drawRect:))
         == class_getMethodImplementation(gProScroller, @selector(drawRect:));
 }
@@ -285,6 +348,7 @@ void SLSkinnedInstall(void)
     if (!gProScroller) _dyld_register_func_for_add_image(SLImageAdded);
     NSString *app = [[NSBundle mainBundle] bundleIdentifier];
     Class cls;
+    if ([app isEqualToString:@"com.apple.Aperture"]) SLApertureInstall();
     if ([app isEqualToString:@"com.apple.reminders"] && (cls = NSClassFromString(@"RemindersLegacyScroller")) && [cls isSubclassOfClass:[NSScroller class]])
         gRemindersScroller = cls;
 }
