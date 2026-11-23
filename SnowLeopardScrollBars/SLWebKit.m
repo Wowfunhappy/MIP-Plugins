@@ -439,6 +439,42 @@ static void sl_wk_setActiveInternal(void *focusController, bool active)
     if (changed) SLRepaintWebScrollbars();
 }
 
+/* A press on a scroll arrow can reach WebCore late: in a window's resize
+   corner, AppKit holds it back until it has been held still for a while (see
+   SLScrollBars.m). The time it was held counts toward the arrow's wait before
+   it starts repeating (ScrollbarThemeMac::initialAutoscrollTimerDelay, which
+   Scrollbar::mouseDown asks for), as it does for NSScroller. The press's time
+   is the event's timestamp, which WebCore's PlatformMouseEvent keeps among
+   its first fields, as a double: seconds since boot in older WebKit, since
+   1970 (WallTime) in newer. It is found as the first value there that is a
+   time in the last minute on either clock; with none, nothing changes. */
+static bool (*orig_scrollbarMouseDown)(void *scrollbar, const void *event);
+static double (*orig_initialAutoscrollDelay)(void *theme);
+static double gWKPressHeld = -1;            // how long the press being handled had been held, or -1
+
+static bool sl_wk_scrollbarMouseDown(void *scrollbar, const void *event)
+{
+    double uptime = [[NSProcessInfo processInfo] systemUptime];
+    double wall = [[NSDate date] timeIntervalSince1970];
+    const double *fields = (const double *)event;
+    gWKPressHeld = -1;
+    for (int i = 0; i < 8 && gWKPressHeld < 0; i++) {
+        double t = fields[i];
+        if (t > uptime - 60 && t <= uptime + 1) gWKPressHeld = MAX(0, uptime - t);
+        else if (t > wall - 60 && t <= wall + 1) gWKPressHeld = MAX(0, wall - t);
+    }
+    bool result = orig_scrollbarMouseDown(scrollbar, event);
+    gWKPressHeld = -1;
+    return result;
+}
+
+static double sl_wk_initialAutoscrollDelay(void *theme)
+{
+    double delay = orig_initialAutoscrollDelay(theme);
+    if (gWKPressHeld > 0) delay = MAX(0, delay - gWKPressHeld);
+    return delay;
+}
+
 static void SLInstallEventLayers(const SLMachHeader *header, intptr_t slide, const char *path)
 {
     SLHookFunctionFn hook = (SLHookFunctionFn)dlsym(RTLD_DEFAULT, "MSHookFunction");
@@ -467,6 +503,12 @@ static void SLInstallEventLayers(const SLMachHeader *header, intptr_t slide, con
     if (SLLayerDisabled(@"active")) setActive = setActiveInternal = NULL;
     if (setActive) hook(setActive, (void *)sl_wk_setActive, (void **)&orig_setActive);
     if (setActiveInternal) hook(setActiveInternal, (void *)sl_wk_setActiveInternal, (void **)&orig_setActiveInternal);
+    void *mouseDown = SLFindSymbolInImage(header, slide, "__ZN7WebCore9Scrollbar9mouseDownERKNS_18PlatformMouseEventE");
+    void *initialDelay = SLFindSymbolInImage(header, slide, "__ZN7WebCore17ScrollbarThemeMac27initialAutoscrollTimerDelayEv");
+    if (mouseDown && initialDelay && !SLLayerDisabled(@"repeat")) {
+        hook(mouseDown, (void *)sl_wk_scrollbarMouseDown, (void **)&orig_scrollbarMouseDown);
+        hook(initialDelay, (void *)sl_wk_initialAutoscrollDelay, (void **)&orig_initialAutoscrollDelay);
+    }
     gScrollbarInvalidateRect = SLFindSymbolInImage(header, slide, "__ZN7WebCore9Scrollbar14invalidateRectERKNS_7IntRectE");
     if (!gScrollbarInvalidateRect) {
         NSLog(@"SnowLeopardScrollBars: WebCore::Scrollbar::invalidateRect not found; web scrollbars WebCore paints may update late.");

@@ -392,26 +392,31 @@ static inline BOOL SLIsArrowPart(NSScrollerPart part)
     return part == NSScrollerDecrementLine || part == NSScrollerIncrementLine;
 }
 
-// A WebKit2 view (Safari's page): its scroll bars are drawn in the web
-// process, but the page proxy here knows whether the page has them, and
+// A WebKit2 view (Safari's page; WKView or WKWebView): its scroll bars are
+// drawn in the web process, but the page proxy here knows whether the page
+// has them (the C API's WKPageHas...Scrollbar, on the view's WKPageRef), and
 // their layout follows from their frame alone (SLStateForWebCoreScrollbar in
 // SLWebKit.m): the vertical one runs down the view's right edge, 15 points
 // wide, stopping short of the bottom-right corner when there is a horizontal
 // one too, with the arrows where the arrow setting puts them.
 static BOOL SLPointIsOnWebKitScrollArrow(NSView *view, NSPoint pointInWindow)
 {
-    static Class wkView;
     static BOOL (*hasVertical)(const void *), (*hasHorizontal)(const void *);
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        wkView = NSClassFromString(@"WKView");
         hasVertical = dlsym(RTLD_DEFAULT, "WKPageHasVerticalScrollbar");
         hasHorizontal = dlsym(RTLD_DEFAULT, "WKPageHasHorizontalScrollbar");
     });
-    if (!wkView || !hasVertical || !hasHorizontal) return NO;
-    while (view && ![view isKindOfClass:wkView]) view = [view superview];
-    if (!view || ![view respondsToSelector:@selector(pageRef)]) return NO;
-    const void *page = ((const void *(*)(id, SEL))objc_msgSend)(view, @selector(pageRef));
+    if (!hasVertical || !hasHorizontal) return NO;
+    // The nearest view that can give its page: -[WKView pageRef], or
+    // -[WKWebView _pageRefForTransitionToWKWebView].
+    SEL pageSelector = NULL;
+    for (; view; view = [view superview]) {
+        if ([view respondsToSelector:@selector(pageRef)]) { pageSelector = @selector(pageRef); break; }
+        if ([view respondsToSelector:@selector(_pageRefForTransitionToWKWebView)]) { pageSelector = @selector(_pageRefForTransitionToWKWebView); break; }
+    }
+    if (!pageSelector) return NO;
+    const void *page = ((const void *(*)(id, SEL))objc_msgSend)(view, pageSelector);
     if (!page || !hasVertical(page)) return NO;
 
     const CGFloat width = 15;
