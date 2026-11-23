@@ -38,6 +38,10 @@ import compose
 EXTRAS2 = '/System/Library/Frameworks/Carbon.framework/Frameworks/HIToolbox.framework/Resources/Extras2.rsrc'
 
 
+# AppKit's track fill for each orientation and size: (horizontal, small) -> (resource ID, index)
+TRACK_FILL = {(False, False): (2040, 0), (True, False): (2032, 0), (False, True): (2620, 0), (True, True): (2700, 0)}
+
+
 def read_pixmaps(path):
     """AppKit's 'pxm#' pixmaps: {(resource ID, index): premultiplied ARGB},
     decoded as the plugin does (SLArt.m)."""
@@ -156,7 +160,10 @@ def main():
             name = str(name)
             try:
                 rid, idx = [int(v) for v in name.split('/')]
-                image = compose.build(spec, renderer.render, 2, pixmaps.get((rid, idx)))
+                small = min(spec['size']) == 11
+                track = TRACK_FILL[(spec['horizontal'], small)]
+                appkit = {'piece': pixmaps.get((rid, idx)), 'track': pixmaps.get(track)}
+                image = compose.build(spec, renderer.render, 2, appkit if appkit['piece'] is not None else None)
             except ValueError as e:
                 sys.stderr.write('build_hidpi: %s: %s\n' % (name, e))
                 continue
