@@ -580,6 +580,8 @@ static BOOL sl_frameWantsUpdateLayer(id self, SEL _cmd)
     return orig_frameWantsUpdateLayer(self, _cmd);
 }
 
+
+
 static void SLHookTextured(void)
 {
     Class themeFrame = NSClassFromString(@"NSThemeFrame");
@@ -707,22 +709,81 @@ static NSImage *SLRetonedTabButton(NSImage *image, NSString *referenceName)
     return copy;
 }
 
-// QuickTime Player's own title bar buttons ("close-active-color" and so on;
-// it draws them itself), as QuickTime Player X drew them on 10.6: the same
-// images by the same names, from 10.6's QuickTime Player (taken from the
-// install DVD by extract.sh). 10.6's fill their 14 x 16 canvas
-// with a 14-point button; Mavericks' are 12 points.
-static NSString *SLSnowLeopardQuickTimePath(NSString *name)
+// Apps' own title bar buttons, drawn from images of their own, in 10.6's
+// size and style. QuickTime Player's ("close-active-color" and so on) are
+// QuickTime Player X's from 10.6, the same images by the same names (taken
+// from the install DVD by extract.sh): 10.6's fill their 14 x 16 canvas with a
+// 14-point button, Mavericks' are 12 points. Apps 10.6 didn't have get
+// QuickTime Player X's too: FaceTime and Reminders use the same names;
+// iBooks has its own, <Aqua|Graphite><state><button> in its library window
+// (IMPlatformCore) and ib_tb_Aqua<state><button> in its reader
+// (BKPlatformCore), which has its three inactive buttons as one image too,
+// ib_tb_traffic_lights-inactive-N, in each of its themes.
+static NSString *SLQuickTimeArtPath(NSString *name)
 {
-    static BOOL quickTime, checked;
-    if (!checked) {
-        quickTime = [[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.QuickTimePlayerX"];
-        checked = YES;
-    }
-    if (!quickTime || [name rangeOfString:@"/"].location != NSNotFound) return nil;
+    if ([name rangeOfString:@"/"].location != NSNotFound) return nil;
     NSString *dir = [[[NSBundle bundleForClass:[SLWindows class]] resourcePath] stringByAppendingPathComponent:@"SLQuickTimeArt"];
     NSString *path = [[dir stringByAppendingPathComponent:name] stringByAppendingPathExtension:@"tiff"];
     return [[NSFileManager defaultManager] fileExistsAtPath:path] ? path : nil;
+}
+
+static NSImage *SLQuickTimeArt(NSString *name)
+{
+    NSString *path = SLQuickTimeArtPath(name);
+    return path ? [[[NSImage alloc] initWithContentsOfFile:path] autorelease] : nil;
+}
+
+static NSString *SLAppIdentifier(void)
+{
+    static NSString *app;
+    if (!app) app = [[[NSBundle mainBundle] bundleIdentifier] copy] ?: @"";
+    return app;
+}
+
+// iBooks' three inactive buttons, as QuickTime Player X's inactive buttons
+// laid out as iBooks lays out its active ones: 20 points apart. QuickTime
+// Player X's "inactive-disabled" buttons are made for its dark title bar, for
+// iBooks' night theme; on light title bars its silver "activenokey" ones look
+// as 10.6's inactive buttons do.
+static NSImage *SLiBooksInactiveButtons(BOOL dark)
+{
+    NSString *state = dark ? @"inactive-disabled" : @"activenokey";
+    NSImage *close = SLQuickTimeArt([@"close-" stringByAppendingFormat:@"%@-color", state]);
+    NSImage *minimize = SLQuickTimeArt([@"minimize-" stringByAppendingFormat:@"%@-color", state]);
+    NSImage *zoom = SLQuickTimeArt([@"zoom-" stringByAppendingFormat:@"%@-color", state]);
+    if (!close || !minimize || !zoom) return nil;
+    NSSize button = [close size];
+    NSImage *image = [[[NSImage alloc] initWithSize:NSMakeSize(40 + button.width, button.height)] autorelease];
+    [image lockFocus];
+    [close drawAtPoint:NSZeroPoint fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1];
+    [minimize drawAtPoint:NSMakePoint(20, 0) fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1];
+    [zoom drawAtPoint:NSMakePoint(40, 0) fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1];
+    [image unlockFocus];
+    return image;
+}
+
+static NSImage *SLAppButtonImage(NSString *name)
+{
+    NSString *app = SLAppIdentifier();
+    if ([app isEqualToString:@"com.apple.QuickTimePlayerX"] || [app isEqualToString:@"com.apple.FaceTime"] || [app isEqualToString:@"com.apple.reminders"])
+        return SLQuickTimeArt(name);
+    if ([app isEqualToString:@"com.apple.iBooksX"]) {
+        if ([name hasPrefix:@"ib_tb_"] && [name hasSuffix:@"traffic_lights-inactive-N"])
+            return SLiBooksInactiveButtons([name hasPrefix:@"ib_tb_night_"]);
+        NSString *rest = [name hasPrefix:@"ib_tb_"] ? [name substringFromIndex:6] : name;
+        static NSDictionary *tints, *states, *buttons;
+        if (!tints) {
+            tints = [@{ @"Aqua": @"color", @"Graphite": @"graphite" } retain];
+            states = [@{ @"Normal": @"active", @"Hover": @"rollover", @"Pressed": @"pd", @"Inactive": @"activenokey" } retain];   // light title bar
+            buttons = [@{ @"Close": @"close", @"Minimize": @"minimize", @"Zoom": @"zoom" } retain];
+        }
+        for (NSString *tint in tints)
+            for (NSString *state in states)
+                for (NSString *button in buttons)
+                    if ([rest isEqualToString:[NSString stringWithFormat:@"%@%@%@", tint, state, button]])
+                        return SLQuickTimeArt([NSString stringWithFormat:@"%@-%@-%@", buttons[button], states[state], tints[tint]]);
+    }
+    return nil;
 }
 
 static id SLReplacementImage(NSImage *image, NSString *name)
@@ -741,15 +802,12 @@ static id SLReplacementImage(NSImage *image, NSString *name)
             return SLRetonedTabButton(image, [prefix stringByAppendingString:@"AddTabButtonRolloverBG Pressed"]);
         return nil;
     }
-    NSString *path = SLSnowLeopardQuickTimePath(name);
-    return path ? [[[NSImage alloc] initWithContentsOfFile:path] autorelease] : nil;
+    return SLAppButtonImage(name);
 }
 
-static id sl_imageNamed(id self, SEL _cmd, NSString *name)
+static id SLReplaced(NSImage *image, NSString *name)
 {
-    NSImage *image = orig_imageNamed(self, _cmd, name);
     if (!image || ![name isKindOfClass:[NSString class]]) return image;
-
     static NSMutableDictionary *cache;
     @synchronized ([NSImage class]) {
         if (!cache) cache = [[NSMutableDictionary alloc] init];
@@ -759,10 +817,25 @@ static id sl_imageNamed(id self, SEL _cmd, NSString *name)
     }
 }
 
+static id sl_imageNamed(id self, SEL _cmd, NSString *name)
+{
+    return SLReplaced(orig_imageNamed(self, _cmd, name), name);
+}
+
+// Images an app's frameworks load from their own bundles (iBooks').
+static id (*orig_imageForResource)(id, SEL, NSString *);
+
+static id sl_imageForResource(id self, SEL _cmd, NSString *name)
+{
+    return SLReplaced(orig_imageForResource(self, _cmd, name), name);
+}
+
 static void SLHookTabArt(void)
 {
     Method m = class_getClassMethod([NSImage class], @selector(imageNamed:));
     if (m) orig_imageNamed = (void *)method_setImplementation(m, (IMP)sl_imageNamed);
+    m = class_getInstanceMethod([NSBundle class], @selector(imageForResource:));
+    if (m) orig_imageForResource = (void *)method_setImplementation(m, (IMP)sl_imageForResource);
 }
 
 // ---- CUIDraw ----------------------------------------------------------------------------
