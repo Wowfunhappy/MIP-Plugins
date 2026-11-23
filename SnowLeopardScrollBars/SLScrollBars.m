@@ -140,6 +140,7 @@ static BOOL (*SL_ORIG(isOpaque))(id, SEL);
 static void (*SL_ORIG(mouseDown))(id, SEL, NSEvent *);
 static NSInteger (*SL_ORIG(hysteresisCheck))(id, SEL, NSEvent *, NSDate *, NSSize, NSPoint *);
 static void (*SL_ORIG(startPeriodicEvents))(id, SEL, NSTimeInterval, NSTimeInterval);
+static BOOL (*SL_ORIG(edgeResizingCursorUpdate))(id, SEL, NSEvent *, NSPoint);
 static CGFloat (*SL_ORIG(impKnobLength))(id, SEL);
 static CGFloat (*SL_ORIG(impKnobEndInset))(id, SEL);
 static void (*SL_ORIG(impSetLayer))(id, SEL, CALayer *);
@@ -336,12 +337,55 @@ static void sl_mouseDown(NSScroller *self, SEL _cmd, NSEvent *event)
 
    The scroller waits gButtonDelay (0.5 s) before it starts repeating; that
    wait is shortened by the time the press was already held, so repeating
-   starts when it would have without the hold. */
+   starts when it would have without the hold.
+
+   The resize cursor goes too: AppKit shows it as an override cursor
+   (+[NSCursor _setOverrideCursor:], from -[NSWindow _edgeResizingCursorUpdate:
+   atLocation:]), which is cleared at the hand-over and not put back while
+   the button is down; when it comes up, the window's edge cursor is brought
+   up to date for wherever the mouse is. */
 // As long as an arrow's own wait before repeating (gButtonDelay, 0.5 s), so a
 // short pause before dragging still resizes, and repeating still starts on time.
 static const NSTimeInterval kSLArrowHoldDelay = 0.5;
 static NSTimeInterval gHeldPressDuration;      // how long a press handed to a scroller had been held
 static NSTimeInterval gHeldPressHandedOver;    // when (system uptime)
+static BOOL gHeldPressActive;                  // a handed-over press may still be down
+static NSWindow *gHeldPressWindow;             // its window (retained while it is)
+
+// The window's edge cursor for wherever the mouse is now (as on a mouse move).
+static void SLRefreshEdgeCursor(NSWindow *window)
+{
+    NSPoint location = [window mouseLocationOutsideOfEventStream];
+    NSEvent *moved = [NSEvent mouseEventWithType:NSMouseMoved location:location modifierFlags:0
+                                       timestamp:[[NSProcessInfo processInfo] systemUptime]
+                                    windowNumber:[window windowNumber] context:nil eventNumber:0 clickCount:0 pressure:0];
+    SL_ORIG(edgeResizingCursorUpdate)(window, NSSelectorFromString(@"_edgeResizingCursorUpdate:atLocation:"), moved, location);
+}
+
+@interface SLHeldPressWatcher : NSObject
+@end
+@implementation SLHeldPressWatcher
+// Polls for the end of a handed-over press: scrollers take the mouse-up inside
+// their own tracking loop, so it may never pass through the window.
++ (void)watch
+{
+    NSTimer *timer = [NSTimer timerWithTimeInterval:0.05 target:self selector:@selector(check:) userInfo:nil repeats:YES];
+    [[NSRunLoop currentRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+    [[NSRunLoop currentRunLoop] addTimer:timer forMode:NSEventTrackingRunLoopMode];
+}
++ (void)check:(NSTimer *)timer
+{
+    if (gHeldPressActive && ([NSEvent pressedMouseButtons] & 1)) return;
+    [timer invalidate];
+    NSWindow *window = gHeldPressWindow;
+    gHeldPressWindow = nil;
+    if (gHeldPressActive) {
+        gHeldPressActive = NO;
+        if (window && SL_ORIG(edgeResizingCursorUpdate)) SLRefreshEdgeCursor(window);
+    }
+    [window release];
+}
+@end
 
 // A WebKit2 view (Safari's page): its scroll bars are drawn in the web
 // process, but the page proxy here knows whether the page has them.
@@ -396,10 +440,25 @@ static NSInteger sl_hysteresisCheck(id self, SEL _cmd, NSEvent *event, NSDate *e
         if (result == 1) {          // expired: held still, so it goes to the scroller as a press
             gHeldPressHandedOver = [[NSProcessInfo processInfo] systemUptime];
             gHeldPressDuration = gHeldPressHandedOver - [event timestamp];
+            // No longer a resize: drop the resize cursor.
+            gHeldPressActive = YES;
+            [gHeldPressWindow release];
+            gHeldPressWindow = [[event window] retain];
+            [SLHeldPressWatcher watch];
+            if ([NSCursor respondsToSelector:@selector(_setOverrideCursor:)])
+                ((void (*)(id, SEL, id))objc_msgSend)([NSCursor class], @selector(_setOverrideCursor:), nil);
+            [[NSCursor arrowCursor] set];
         }
         return result;
     }
     return SL_ORIG(hysteresisCheck)(self, _cmd, event, expiration, distance, location);
+}
+
+static BOOL sl_edgeResizingCursorUpdate(id self, SEL _cmd, NSEvent *event, NSPoint location)
+{
+    if (gHeldPressActive && ([NSEvent pressedMouseButtons] & 1))
+        return NO;          // still pressing the scroll bar: no resize cursor
+    return SL_ORIG(edgeResizingCursorUpdate)(self, _cmd, event, location);
 }
 
 static void sl_startPeriodicEvents(id self, SEL _cmd, NSTimeInterval delay, NSTimeInterval period)
@@ -720,6 +779,10 @@ BOOL SLHook(Class cls, SEL sel, IMP replacement, IMP *original)
         SLHook(windowMeta, hysteresis, (IMP)sl_hysteresisCheck, (IMP *)&SL_ORIG(hysteresisCheck))) {
         SLHook(object_getClass([NSEvent class]), @selector(startPeriodicEventsAfterDelay:withPeriod:),
                (IMP)sl_startPeriodicEvents, (IMP *)&SL_ORIG(startPeriodicEvents));
+        SEL cursorUpdate = NSSelectorFromString(@"_edgeResizingCursorUpdate:atLocation:");
+        Method update = class_getInstanceMethod([NSWindow class], cursorUpdate);
+        if (update && !strcmp(method_getTypeEncoding(update), "c40@0:8@16{CGPoint=dd}24"))
+            SLHook([NSWindow class], cursorUpdate, (IMP)sl_edgeResizingCursorUpdate, (IMP *)&SL_ORIG(edgeResizingCursorUpdate));
     }
 
     // Page scrollbars in WebKit (Safari's WebContent process, WebViews).
