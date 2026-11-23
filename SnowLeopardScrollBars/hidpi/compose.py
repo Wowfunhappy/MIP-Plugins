@@ -11,6 +11,11 @@ side: CoreUI's horizontal art is the same (within a few levels at 1x), and
 Mavericks' renderer draws horizontal states badly at 2x (holes, stray white
 pixels and dashed outlines, none of which occur in its vertical renderings).
 
+The arrow buttons and end caps are cleaned up to match AppKit's: CoreUI frames
+them with a dark outline (sides, end, and the curve where the box meets the
+track's rounded end) that AppKit's art does not have. clean_frame() takes
+those few pixels from AppKit's own pixmap, scaled up.
+
 The small arrows' recipes only describe 1x geometry (Mavericks' renderer
 returns them at 1x size whatever the scale), so their twins are CoreUI's 1x
 art scaled up ('upscale'): as soft as before, but the same art as the sharp
@@ -70,15 +75,70 @@ def upscale(x, factor):
             x[y1][:, x0] * fy * (1 - fx) + x[y1][:, x1] * fy * fx)
 
 
-def build(spec, render, scale):
+def edge_line(line):
+    """AppKit's edge column (or end row), without the features that cross it
+    (the ends of the separator line between two arrows): a pixel more than 10
+    levels from the median of the pixels around it takes that median."""
+    out = line.copy()
+    for i in range(line.shape[0]):
+        med = np.median(line[max(0, i - 3):i + 4], 0)
+        if np.abs(line[i] - med)[1:].max() > 10:
+            out[i] = med
+    return out
+
+
+def clean_frame(spec, parts1x, appkit, x):
+    """Removes CoreUI's outline from an arrow piece at 2x (vertical, in place).
+
+    appkit: AppKit's 1x pixmap of the piece (vertical). The outermost point
+    on both sides and at the scroll bar's end take AppKit's edge pixels; along
+    the curve where the box meets the track's rounded end (the darkest pixel
+    of each column within the arrow layer's notch part), AppKit's pixels scaled
+    up are blended in, fading back to CoreUI's within a few pixels."""
+    L, W = appkit.shape[:2]
+    left, right = edge_line(appkit[:, 0]), edge_line(appkit[:, W - 1])
+    x[:, 0:2] = np.repeat(left[:, None], 2, 0)
+    x[:, 2 * W - 2:] = np.repeat(right[:, None], 2, 0)
+    end = edge_line(appkit[0] if spec['at_start'] else appkit[L - 1])
+    end2 = np.repeat(np.repeat(end[None], 2, 1), 2, 0)[:, 2:2 * W - 2]
+    if spec['at_start']:
+        x[0:2, 2:2 * W - 2] = end2
+    else:
+        x[2 * L - 2:, 2:2 * W - 2] = end2
+
+    lengths = [p.shape[0] for p in parts1x]
+    total = sum(lengths)
+    if spec['at_start']:
+        r0 = spec['O'] + total - lengths[-1]
+        r1 = r0 + lengths[-1]
+    else:
+        r0 = L - spec['O'] - total
+        r1 = r0 + lengths[0]
+    up = upscale(appkit, 2)
+    lum = x[..., 1:].mean(2)
+    for i in range(2, 2 * W - 2):
+        c = 2 * r0 + int(np.argmin(lum[2 * r0:2 * r1, i]))
+        for y in range(max(0, c - 5), min(2 * L, c + 6)):
+            d = abs(y - c)
+            w = 1.0 if d <= 2 else 1 - (d - 2) / 4.0
+            x[y, i] = x[y, i] * (1 - w) + up[y, i] * w
+
+
+def build(spec, render, scale, appkit=None):
     """The piece described by spec at `scale` (1 or 2).
 
     render(perm, scale, overrides) -> list of parts (as rendered), or None.
     The CoreUI states named in spec are vertical ones; for a horizontal piece
-    the result is turned on its side."""
-    if spec.get('upscale') and scale > 1:
-        return upscale(build(spec, render, 1), scale)
+    the result is turned on its side. appkit (optional): AppKit's 1x pixmap of
+    the piece, for clean_frame at 2x."""
     horizontal = spec['horizontal']
+    if spec.get('upscale') and scale > 1:
+        out = upscale(build(spec, render, 1), scale)
+        if spec['type'] == 'arrows' and appkit is not None and scale == 2:
+            v = transpose(out) if horizontal else out
+            clean_frame(spec, render(spec['arrows'], 1, {}), transpose(appkit) if horizontal else appkit, v)
+            out = transpose(v) if horizontal else v
+        return out
     w, h = spec['size']
     length, across = (w, h) if horizontal else (h, w)
     L, A = length * scale, across * scale
@@ -126,6 +186,8 @@ def build(spec, render, scale):
         out = crop(p, (p.shape[0] - L) // 2, L)
     else:
         raise ValueError(kind)
+    if kind == 'arrows' and appkit is not None and scale == 2:
+        clean_frame(spec, render(spec['arrows'], 1, {}), transpose(appkit) if horizontal else appkit, out)
     out = out[:, :A]
     if out.shape[1] < A:
         out = np.concatenate([out, np.zeros((out.shape[0], A - out.shape[1], 4))], 1)

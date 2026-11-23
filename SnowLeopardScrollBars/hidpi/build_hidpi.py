@@ -14,7 +14,9 @@ So for each AppKit pixmap, pieces.json names the CoreUI state(s) to render and
 how to cut and assemble them so the result lines up with the pixmap exactly,
 at twice the size (see compose.py). The 2x images are rendered here, at build
 time, by Mavericks' own copy of the recipe renderer (render_server.m) from
-10.6's recipes, unmodified.
+10.6's recipes. The one change: CoreUI frames its arrow buttons with a dark
+outline AppKit's art does not have; compose.clean_frame replaces those pixels
+with AppKit's own (read from the system's Extras2.rsrc).
 
 The small arrows' recipes only describe 1x geometry, so their twins are
 CoreUI's 1x art scaled up. Pieces not in pieces.json (the Clear-tint pressed
@@ -31,6 +33,43 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import compose
+
+
+EXTRAS2 = '/System/Library/Frameworks/Carbon.framework/Frameworks/HIToolbox.framework/Resources/Extras2.rsrc'
+
+
+def read_pixmaps(path):
+    """AppKit's 'pxm#' pixmaps: {(resource ID, index): premultiplied ARGB},
+    decoded as the plugin does (SLArt.m)."""
+    d = open(path, 'rb').read()
+    data_off, map_off = struct.unpack('>II', d[:8])
+    types = map_off + struct.unpack('>H', d[map_off + 24:map_off + 26])[0]
+    out = {}
+    for i in range(struct.unpack('>h', d[types:types + 2])[0] + 1):
+        t = types + 2 + 8 * i
+        if d[t:t + 4] != 'pxm#':
+            continue
+        refs = types + struct.unpack('>H', d[t + 6:t + 8])[0]
+        for j in range(struct.unpack('>H', d[t + 4:t + 6])[0] + 1):
+            r = refs + 12 * j
+            rid = struct.unpack('>h', d[r:r + 2])[0]
+            off = data_off + (struct.unpack('>I', d[r + 4:r + 8])[0] & 0xffffff)
+            p = d[off + 4:off + 4 + struct.unpack('>I', d[off:off + 4])[0]]
+            version, flags, top, left, bottom, right = struct.unpack('<HHhhhh', p[:12])
+            count = struct.unpack('<H', p[0x16:0x18])[0]
+            if version != 3 or not flags & 4:
+                continue
+            w, h = right - left, bottom - top
+            mask_rows = ((w + 15) >> 4) * 2
+            masks = 1 if flags & 1 else count
+            row_bytes = ((32 * w + 15) >> 4) * 2
+            for k in range(count):
+                start = 0x18 + masks * mask_rows * h + k * row_bytes * h
+                rows = [np.fromstring(p[start + y * row_bytes:start + y * row_bytes + 4 * w], np.uint8).reshape(w, 4)
+                        for y in range(h)]
+                rgba = np.array(rows, dtype=np.float64)
+                out[(rid, k)] = rgba[..., [3, 0, 1, 2]]          # RGBA -> ARGB
+    return out
 
 
 def load_recipe(ui_bundle, category, tmp):
@@ -106,6 +145,7 @@ def main():
         sys.exit('usage: build_hidpi.py <10.6 UI.bundle> <tools dir> <output.bin>')
     ui_bundle, tools, output = sys.argv[1:]
     pieces = json.load(open(os.path.join(HERE, 'pieces.json')))
+    pixmaps = read_pixmaps(EXTRAS2)
     tmp = tempfile.mkdtemp(prefix='slscroll')
     try:
         renderer = Renderer(ui_bundle, tools, tmp)
@@ -115,7 +155,8 @@ def main():
             spec = pieces[name]
             name = str(name)
             try:
-                image = compose.build(spec, renderer.render, 2)
+                rid, idx = [int(v) for v in name.split('/')]
+                image = compose.build(spec, renderer.render, 2, pixmaps.get((rid, idx)))
             except ValueError as e:
                 sys.stderr.write('build_hidpi: %s: %s\n' % (name, e))
                 continue
