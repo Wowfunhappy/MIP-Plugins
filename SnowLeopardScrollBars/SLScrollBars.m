@@ -29,6 +29,7 @@
 
 #import "SLScrollBars.h"
 #import <QuartzCore/QuartzCore.h>
+#import <dlfcn.h>
 
 // ---- private AppKit API we rely on ---------------------------------------
 
@@ -314,7 +315,7 @@ static void sl_mouseDown(NSScroller *self, SEL _cmd, NSEvent *event)
     SL_ORIG(mouseDown)(self, _cmd, event);
 }
 
-/* Pressing and holding a scroll arrow in a window's resize corner.
+/* Pressing and holding a scroll bar (an arrow, usually) in a window's resize corner.
 
    Mavericks lets any window be resized from its corners, and the bottom-right
    one is where a lone vertical scroller has its down arrow. A mouse-down
@@ -325,10 +326,12 @@ static void sl_mouseDown(NSScroller *self, SEL _cmd, NSEvent *event)
    [NSDate distantFuture], so holding the button still never reaches the
    scroller and an arrow can't be held down to keep scrolling.
 
-   For a press on a scroll arrow, the wait gets an expiration instead: held
+   For a press on a scroll bar (an NSScroller, or a WebKit2 page's scroll bar,
+   which Safari draws in another process), the wait gets an expiration: held
    still for kSLArrowHoldDelay, the check returns "expired", which AppKit
    treats like a click, but now with the button still down, so the scroller
-   tracks it (-trackScrollButtons:) and repeats. Moving first still resizes;
+   tracks it (-trackScrollButtons:, or WebKit's own tracking) and repeats.
+   Moving first still resizes;
    a quick click still works on mouse-up.
 
    The scroller waits gButtonDelay (0.5 s) before it starts repeating; that
@@ -338,7 +341,37 @@ static const NSTimeInterval kSLArrowHoldDelay = 0.25;
 static NSTimeInterval gHeldPressDuration;      // how long a press handed to a scroller had been held
 static NSTimeInterval gHeldPressHandedOver;    // when (system uptime)
 
-static BOOL SLEventIsOnScrollArrow(NSEvent *event)
+// A WebKit2 view (Safari's page): its scroll bars are drawn in the web
+// process, but the page proxy here knows whether the page has them.
+static BOOL SLPointIsOnWebKitScrollbar(NSView *view, NSPoint pointInWindow)
+{
+    static Class wkView;
+    static BOOL (*hasVertical)(const void *), (*hasHorizontal)(const void *);
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        wkView = NSClassFromString(@"WKView");
+        hasVertical = dlsym(RTLD_DEFAULT, "WKPageHasVerticalScrollbar");
+        hasHorizontal = dlsym(RTLD_DEFAULT, "WKPageHasHorizontalScrollbar");
+    });
+    if (!wkView || !hasVertical || !hasHorizontal) return NO;
+    while (view && ![view isKindOfClass:wkView]) view = [view superview];
+    if (!view || ![view respondsToSelector:@selector(pageRef)]) return NO;
+    const void *page = ((const void *(*)(id, SEL))objc_msgSend)(view, @selector(pageRef));
+    if (!page || !hasVertical(page)) return NO;
+
+    // The vertical scroll bar runs down the right edge, [NSScroller scrollerWidth] wide
+    // (legacy style); with a horizontal one too, the bottom-right square is the empty corner.
+    CGFloat width = [NSScroller scrollerWidthForControlSize:NSRegularControlSize scrollerStyle:NSScrollerStyleLegacy];
+    NSPoint p = [view convertPoint:pointInWindow fromView:nil];
+    NSRect b = [view bounds];
+    if (p.x < NSMaxX(b) - width) return NO;
+    CGFloat fromBottom = [view isFlipped] ? NSMaxY(b) - p.y : p.y - NSMinY(b);
+    return !(hasHorizontal(page) && fromBottom < width);
+}
+
+// Is the mouse-down on a scroll bar (other than its thumb, which AppKit
+// already exempts from resizing)?
+static BOOL SLEventIsOnScroller(NSEvent *event)
 {
     NSWindow *window = [event window];
     NSView *frame = [[window contentView] superview];
@@ -347,14 +380,14 @@ static BOOL SLEventIsOnScrollArrow(NSEvent *event)
     NSView *hit = [frame respondsToSelector:@selector(_hitTest:ignoringResizeRegion:)]
                 ? ((NSView *(*)(id, SEL, NSPoint, BOOL))objc_msgSend)(frame, @selector(_hitTest:ignoringResizeRegion:), p, YES)
                 : [frame hitTest:p];
-    if (![hit isKindOfClass:[NSScroller class]] || !SLIsLegacy((NSScroller *)hit)) return NO;
-    NSScrollerPart part = [(NSScroller *)hit testPart:p];
-    return part == NSScrollerDecrementLine || part == NSScrollerIncrementLine;
+    if ([hit isKindOfClass:[NSScroller class]])
+        return SLIsLegacy((NSScroller *)hit) && [(NSScroller *)hit testPart:p] != NSScrollerNoPart;
+    return SLPointIsOnWebKitScrollbar(hit, p);
 }
 
 static NSInteger sl_hysteresisCheck(id self, SEL _cmd, NSEvent *event, NSDate *expiration, NSSize distance, NSPoint *location)
 {
-    if ([expiration timeIntervalSinceNow] > 3600 && [event type] == NSLeftMouseDown && SLEventIsOnScrollArrow(event)) {
+    if ([expiration timeIntervalSinceNow] > 3600 && [event type] == NSLeftMouseDown && SLEventIsOnScroller(event)) {
         NSTimeInterval now = [[NSProcessInfo processInfo] systemUptime];
         NSTimeInterval wait = MAX(0, kSLArrowHoldDelay - (now - [event timestamp]));
         NSInteger result = SL_ORIG(hysteresisCheck)(self, _cmd, event, [NSDate dateWithTimeIntervalSinceNow:wait], distance, location);
