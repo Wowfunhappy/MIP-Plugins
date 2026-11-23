@@ -332,17 +332,21 @@ static BOOL sl_isOpaque(NSScroller *self, SEL _cmd)
     return YES;
 }
 
+// With arrows at both ends, remember which pair a press (at a point in the
+// window) landed in, so the right pair lights up.
+static void SLNoteArrowPair(NSScroller *self, NSPoint pointInWindow)
+{
+    if (!(SLIsLegacy(self) && gArrowConfig == kSLArrowsDoubleBoth && [self arrowsPosition] != NSScrollerArrowsNone)) return;
+    SLState st = SLStateForScroller(self);
+    NSPoint p = [self convertPoint:pointInWindow fromView:nil];
+    CGFloat along = st.horizontal ? p.x : p.y;
+    CGFloat length = st.horizontal ? st.bounds.size.width : st.bounds.size.height;
+    if (along > length * 0.5) SL_SFLAGS2(self) |= kSFlags2MaxEndHit; else SL_SFLAGS2(self) &= ~kSFlags2MaxEndHit;
+}
+
 static void sl_mouseDown(NSScroller *self, SEL _cmd, NSEvent *event)
 {
-    if (SLIsLegacy(self) && gArrowConfig == kSLArrowsDoubleBoth && [self arrowsPosition] != NSScrollerArrowsNone) {
-        // Remember which of the two arrow pairs the click landed in, so the
-        // right pair lights up.
-        SLState st = SLStateForScroller(self);
-        NSPoint p = [self convertPoint:[event locationInWindow] fromView:nil];
-        CGFloat along = st.horizontal ? p.x : p.y;
-        CGFloat length = st.horizontal ? st.bounds.size.width : st.bounds.size.height;
-        if (along > length * 0.5) SL_SFLAGS2(self) |= kSFlags2MaxEndHit; else SL_SFLAGS2(self) &= ~kSFlags2MaxEndHit;
-    }
+    SLNoteArrowPair(self, [event locationInWindow]);
     SL_ORIG(mouseDown)(self, _cmd, event);
 }
 
@@ -368,6 +372,11 @@ static void sl_mouseDown(NSScroller *self, SEL _cmd, NSEvent *event)
    The scroller waits gButtonDelay (0.5 s) before it starts repeating; that
    wait is shortened by the time the press was already held, so repeating
    starts when it would have without the hold.
+
+   While AppKit waits, the arrow is shown pressed, as it would be on 10.6
+   from the moment the button goes down: otherwise a quick click only
+   reaches the scroller once the button is already up, and its highlight
+   comes and goes in the same pass, never seen.
 
    The resize cursor goes too: AppKit shows it as an override cursor
    (+[NSCursor _setOverrideCursor:], from -[NSWindow _edgeResizingCursorUpdate:
@@ -467,9 +476,11 @@ static BOOL SLPointIsOnWebKitScrollArrow(NSView *view, NSPoint pointInWindow)
     return SLIsArrowPart(SLHitTest(&st, NSMakePoint(p.x - (NSMaxX(b) - width), fromTop)));
 }
 
-// Is the mouse-down on a scroll arrow?
-static BOOL SLEventIsOnScrollArrow(NSEvent *event)
+// Is the mouse-down on a scroll arrow? If it is an NSScroller's, *scroller is
+// set to it (a WebKit2 page's is drawn in another process).
+static BOOL SLEventIsOnScrollArrow(NSEvent *event, NSScroller **scroller)
 {
+    *scroller = nil;
     NSWindow *window = [event window];
     NSView *frame = [[window contentView] superview];
     if (!frame) return NO;
@@ -477,17 +488,47 @@ static BOOL SLEventIsOnScrollArrow(NSEvent *event)
     NSView *hit = [frame respondsToSelector:@selector(_hitTest:ignoringResizeRegion:)]
                 ? ((NSView *(*)(id, SEL, NSPoint, BOOL))objc_msgSend)(frame, @selector(_hitTest:ignoringResizeRegion:), p, YES)
                 : [frame hitTest:p];
-    if ([hit isKindOfClass:[NSScroller class]])
-        return SLIsLegacy((NSScroller *)hit) && SLIsArrowPart([(NSScroller *)hit testPart:p]);
+    if ([hit isKindOfClass:[NSScroller class]]) {
+        if (!(SLIsLegacy((NSScroller *)hit) && SLIsArrowPart([(NSScroller *)hit testPart:p]))) return NO;
+        *scroller = (NSScroller *)hit;
+        return YES;
+    }
     return SLPointIsOnWebKitScrollArrow(hit, p);
 }
 
 static NSInteger sl_hysteresisCheck(id self, SEL _cmd, NSEvent *event, NSDate *expiration, NSSize distance, NSPoint *location)
 {
-    if ([expiration timeIntervalSinceNow] > 3600 && [event type] == NSLeftMouseDown && SLEventIsOnScrollArrow(event)) {
+    NSScroller *scroller = nil;
+    if ([expiration timeIntervalSinceNow] > 3600 && [event type] == NSLeftMouseDown && SLEventIsOnScrollArrow(event, &scroller)) {
         NSTimeInterval now = [[NSProcessInfo processInfo] systemUptime];
         NSTimeInterval wait = MAX(0, kSLArrowHoldDelay - (now - [event timestamp]));
+
+        // The arrow, shown pressed while the button is down (as its own
+        // tracking would show it: hit part, pair, highlighted).
+        unsigned flags = 0, flags2 = 0;
+        if (scroller) {
+            [scroller retain];
+            flags = SL_SFLAGS(scroller);
+            flags2 = SL_SFLAGS2(scroller);
+            NSScrollerPart part = [scroller testPart:[event locationInWindow]];
+            SL_SFLAGS2(scroller) = (flags2 & ~kSFlags2HitPartMask) | ((unsigned)part & kSFlags2HitPartMask);
+            SLNoteArrowPair(scroller, [event locationInWindow]);
+            [scroller highlight:YES];
+            [scroller displayIfNeeded];
+            [CATransaction flush];
+        }
+
         NSInteger result = SL_ORIG(hysteresisCheck)(self, _cmd, event, [NSDate dateWithTimeIntervalSinceNow:wait], distance, location);
+
+        // Back as it was: a resize leaves it alone, and a click or hold is
+        // handed to the scroller, which tracks (and highlights) it itself.
+        if (scroller) {
+            [scroller highlight:NO];
+            SL_SFLAGS(scroller) = (SL_SFLAGS(scroller) & ~kSFlagPartHit) | (flags & kSFlagPartHit);
+            SL_SFLAGS2(scroller) = (SL_SFLAGS2(scroller) & ~(kSFlags2HitPartMask | kSFlags2MaxEndHit))
+                                 | (flags2 & (kSFlags2HitPartMask | kSFlags2MaxEndHit));
+            [scroller release];
+        }
         if (result == 1) {          // expired: held still, so it goes to the scroller as a press
             gHeldPressHandedOver = [[NSProcessInfo processInfo] systemUptime];
             gHeldPressDuration = gHeldPressHandedOver - [event timestamp];
