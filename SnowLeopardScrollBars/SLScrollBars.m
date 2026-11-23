@@ -96,10 +96,13 @@ static BOOL SLHasCustomAppearance(NSView *view)
     return appearance && !((BOOL (*)(id, SEL))objc_msgSend)(appearance, isDefault);
 }
 
+// Whether this scroller gets 10.6's scroll bars: legacy style, and not part of
+// an app's own look - a custom appearance, or a scroller the app skins itself
+// for Lion (SLSkinned.m) - unless it's one of the skins handled there.
 static inline BOOL SLIsLegacy(NSScroller *scroller)
 {
     return gEnabled && [scroller scrollerStyle] == NSScrollerStyleLegacy
-        && (SLRemindersScroller(scroller) || !SLHasCustomAppearance(scroller));
+        && (SLSkinHandled(scroller) || (!SLLionSkin(scroller) && !SLHasCustomAppearance(scroller)));
 }
 
 int SLArrowConfig(void) { return gArrowConfig; }
@@ -255,7 +258,7 @@ static void sl_oldDrawArrow(NSScroller *self, SEL _cmd, NSScrollerArrow arrow, N
 {
     if (!SLIsLegacy(self)) { SL_ORIG(oldDrawArrow)(self, _cmd, arrow, highlightPart); return; }
     SLState st = SLStateForScroller(self);
-    if (SLSkinnedScroller(self)) { SLSkinnedPaintArrow(self, &st, arrow, highlightPart); return; }
+    if (SLSkinHandled(self)) { SLSkinnedPaintArrow(self, &st, arrow, highlightPart); return; }
     SLPaintArrow(&st, arrow, highlightPart);
 }
 
@@ -324,7 +327,7 @@ static BOOL sl_wantsUpdateLayer(NSScroller *self, SEL _cmd)
 static BOOL sl_isOpaque(NSScroller *self, SEL _cmd)
 {
     // An app's own skin may have a translucent track.
-    if (!SLIsLegacy(self) || SLSkinnedScroller(self)) return SL_ORIG(isOpaque)(self, _cmd);
+    if (!SLIsLegacy(self) || SLSkinHandled(self)) return SL_ORIG(isOpaque)(self, _cmd);
     return YES;
 }
 
