@@ -707,29 +707,54 @@ static NSImage *SLRetonedTabButton(NSImage *image, NSString *referenceName)
     return copy;
 }
 
+// QuickTime Player's own title bar buttons ("close-active-color" and so on;
+// it draws them itself), as QuickTime Player X drew them on 10.6: the same
+// images by the same names, from 10.6's QuickTime Player (taken from the
+// install DVD at build time; see build.sh). 10.6's fill their 14 x 16 canvas
+// with a 14-point button; Mavericks' are 12 points.
+static NSString *SLSnowLeopardQuickTimePath(NSString *name)
+{
+    static BOOL quickTime, checked;
+    if (!checked) {
+        quickTime = [[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.QuickTimePlayerX"];
+        checked = YES;
+    }
+    if (!quickTime || [name rangeOfString:@"/"].location != NSNotFound) return nil;
+    NSString *dir = [[[NSBundle bundleForClass:[SLWindows class]] resourcePath] stringByAppendingPathComponent:@"SLQuickTimeArt"];
+    NSString *path = [[dir stringByAppendingPathComponent:name] stringByAppendingPathExtension:@"tiff"];
+    return [[NSFileManager defaultManager] fileExistsAtPath:path] ? path : nil;
+}
+
+static id SLReplacementImage(NSImage *image, NSString *name)
+{
+    if ([name hasPrefix:@"AW "] || [name hasPrefix:@"IW "]) {
+        NSString *prefix = [name substringToIndex:3], *rest = [name substringFromIndex:3];
+        // Finder's name for the tabs behind the selected one.
+        if ([rest isEqualToString:@"InactiveTabFill"]) rest = @"InactiveTabBG";
+        NSString *path = SLSnowLeopardTabPath([prefix stringByAppendingString:rest]);
+        if (path) return [[[NSImage alloc] initWithContentsOfFile:path] autorelease];
+        if ([rest isEqualToString:@"SingleTabAddButton"])
+            return SLRetonedTabButton(image, [prefix stringByAppendingString:@"InactiveTabBG"]);
+        if ([rest isEqualToString:@"SingleTabAddButtonRollover"])
+            return SLRetonedTabButton(image, [prefix stringByAppendingString:@"AddTabButtonRolloverBG"]);
+        if ([rest isEqualToString:@"SingleTabAddButtonPressed"])
+            return SLRetonedTabButton(image, [prefix stringByAppendingString:@"AddTabButtonRolloverBG Pressed"]);
+        return nil;
+    }
+    NSString *path = SLSnowLeopardQuickTimePath(name);
+    return path ? [[[NSImage alloc] initWithContentsOfFile:path] autorelease] : nil;
+}
+
 static id sl_imageNamed(id self, SEL _cmd, NSString *name)
 {
     NSImage *image = orig_imageNamed(self, _cmd, name);
-    if (!image || ![name isKindOfClass:[NSString class]] || !([name hasPrefix:@"AW "] || [name hasPrefix:@"IW "])) return image;
+    if (!image || ![name isKindOfClass:[NSString class]]) return image;
 
     static NSMutableDictionary *cache;
     @synchronized ([NSImage class]) {
         if (!cache) cache = [[NSMutableDictionary alloc] init];
         id replacement = cache[name];
-        if (!replacement) {
-            NSString *prefix = [name substringToIndex:3], *rest = [name substringFromIndex:3];
-            // Finder's name for the tabs behind the selected one.
-            if ([rest isEqualToString:@"InactiveTabFill"]) rest = @"InactiveTabBG";
-            NSString *path = SLSnowLeopardTabPath([prefix stringByAppendingString:rest]);
-            if (path) replacement = [[[NSImage alloc] initWithContentsOfFile:path] autorelease];
-            else if ([rest isEqualToString:@"SingleTabAddButton"])
-                replacement = SLRetonedTabButton(image, [prefix stringByAppendingString:@"InactiveTabBG"]);
-            else if ([rest isEqualToString:@"SingleTabAddButtonRollover"])
-                replacement = SLRetonedTabButton(image, [prefix stringByAppendingString:@"AddTabButtonRolloverBG"]);
-            else if ([rest isEqualToString:@"SingleTabAddButtonPressed"])
-                replacement = SLRetonedTabButton(image, [prefix stringByAppendingString:@"AddTabButtonRolloverBG Pressed"]);
-            cache[name] = replacement = replacement ?: (id)[NSNull null];    // NSNull: an image 10.6 has nothing for
-        }
+        if (!replacement) cache[name] = replacement = SLReplacementImage(image, name) ?: (id)[NSNull null];   // NSNull: 10.6 has nothing for it
         return replacement != [NSNull null] ? replacement : image;
     }
 }

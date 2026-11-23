@@ -14,6 +14,9 @@
 #
 # Safari's and Finder's tabs use Safari 4's tab images (the "AW"/"IW" PNGs),
 # taken from Safari.pkg on the same install DVD (or SL_SAFARIPKG).
+#
+# QuickTime Player's title bar buttons are QuickTime Player X's, taken from
+# Essentials.pkg on the same DVD (or SL_ESSENTIALSPKG).
 set -e
 cd "$(dirname "$0")"
 
@@ -24,8 +27,9 @@ UIBUNDLE="$(dirname "$ARTFILE")/UI.bundle"
 # The DVD's root: ArtFile.bin is in System/Library/PrivateFrameworks/CoreUI.framework/Versions/A/Resources.
 DVDROOT="$(cd "$(dirname "$ARTFILE")/../../../../../../.." 2>/dev/null && pwd)"
 SAFARIPKG="${SL_SAFARIPKG:-$DVDROOT/System/Installation/Packages/Safari.pkg}"
+ESSENTIALSPKG="${SL_ESSENTIALSPKG:-$DVDROOT/System/Installation/Packages/Essentials.pkg}"
 
-for input in "$ARTFILE" "$UIBUNDLE/Contents/Recipes" "$SAFARIPKG"; do
+for input in "$ARTFILE" "$UIBUNDLE/Contents/Recipes" "$SAFARIPKG" "$ESSENTIALSPKG"; do
     if [ ! -e "$input" ]; then
         echo "Not found: $input" >&2
         echo "Mount a Mac OS X 10.6 install DVD, or pass the path to 10.6's" >&2
@@ -53,6 +57,15 @@ mkdir -p build/tools/safari "$BUNDLE/Contents/Resources/SLTabArt"
     cpio -id './Applications/Safari.app/Contents/Resources/AW *.png' './Applications/Safari.app/Contents/Resources/IW *.png' 2>/dev/null)
 cp build/tools/safari/Applications/Safari.app/Contents/Resources/[AI]W\ *.png "$BUNDLE/Contents/Resources/SLTabArt/"
 rm -rf build/tools/safari
+
+# QuickTime Player X's title bar buttons.
+mkdir -p build/tools/essentials "$BUNDLE/Contents/Resources/SLQuickTimeArt"
+(cd build/tools/essentials && xar -xf "$ESSENTIALSPKG" Payload && gzip -dc Payload |
+    cpio -id './Applications/QuickTime Player.app/Contents/Resources/close*.tiff' \
+             './Applications/QuickTime Player.app/Contents/Resources/minimize*.tiff' \
+             './Applications/QuickTime Player.app/Contents/Resources/zoom*.tiff' 2>/dev/null)
+cp build/tools/essentials/Applications/QuickTime\ Player.app/Contents/Resources/*.tiff "$BUNDLE/Contents/Resources/SLQuickTimeArt/"
+rm -rf build/tools/essentials
 
 clang -bundle -arch i386 -arch x86_64 -mmacosx-version-min=10.9 \
     -Os -Wall -Wno-deprecated-declarations -fno-objc-arc \
