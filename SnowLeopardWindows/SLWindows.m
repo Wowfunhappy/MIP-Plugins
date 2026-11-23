@@ -68,7 +68,7 @@ typedef void (*SLHookFunctionFn)(void *symbol, void *replacement, void **origina
 
 static SLCUIDrawFn orig_CUIDraw;
 static CFDictionaryRef gArt;            // image name -> CGImageRef
-static CFDictionaryRef gArt2x;          // the same at 2x, for Retina displays (may be empty)
+static CFDictionaryRef gArt2x;          // the same at 2x, for Retina displays
 static CGColorSpaceRef gColorSpace;     // Generic RGB, as 10.6's CoreUI art
 
 @interface SLWindows : NSObject
@@ -111,15 +111,14 @@ static CFDictionaryRef SLReadArtFile(NSString *resource)
     return art;
 }
 
-// SLWindowArt.bin: 10.6's 1x images. SLWindowArt@2x.bin (optional): the same
-// images at 2x, rendered at build time from 10.6's recipes (render_hidpi.m).
+// SLWindowArt.bin: 10.6's 1x images. SLWindowArt@2x.bin: the same images at
+// 2x, rendered at build time from 10.6's recipes (render_hidpi.m).
 static BOOL SLLoadArt(void)
 {
     gColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceGenericRGB);
     gArt = SLReadArtFile(@"SLWindowArt");
-    if (!gArt || CFDictionaryGetCount(gArt) == 0) return NO;
     gArt2x = SLReadArtFile(@"SLWindowArt@2x");
-    return YES;
+    return gArt && gArt2x && CFDictionaryGetCount(gArt) > 0;
 }
 
 static CGImageRef SLArtImage(NSString *name)
@@ -162,7 +161,7 @@ static void SLDrawButton(NSString *name, CGRect rect, CGContextRef ctx, BOOL fli
     CGImageRef image = SLArtImage(name);
     CGFloat w = CGImageGetWidth(image), h = CGImageGetHeight(image);
     // On a Retina display, the 2x rendering of the same image in the same place.
-    CGImageRef image2x = gArt2x && SLContextScale(ctx) >= 2 ? (CGImageRef)CFDictionaryGetValue(gArt2x, (CFStringRef)name) : NULL;
+    CGImageRef image2x = SLContextScale(ctx) >= 2 ? (CGImageRef)CFDictionaryGetValue(gArt2x, (CFStringRef)name) : NULL;
     if (image2x && CGImageGetWidth(image2x) == 2 * w && CGImageGetHeight(image2x) == 2 * h) image = image2x;
     // 10.6's images include the button's shadow; centre horizontally, top aligned.
     CGFloat x = rect.origin.x + floor((rect.size.width - w) / 2);
@@ -610,34 +609,8 @@ static void SLHookTextured(void)
 // Finder calls the tabs behind the selected one "InactiveTabFill" (Safari 4:
 // "InactiveTabBG"). The one image 10.6 has no counterpart for, the tab-shaped
 // new-tab button shown with a single tab, keeps its outline in 10.6's tones.
-//
-// Without Safari 4's images, Mavericks' are darkened to suit 10.6's toolbar,
-// which ends darker: the selected tab is about 175 on screen (223 in an
-// inactive window) where 10.6's toolbar ends at 168 (216).
 
 static id (*orig_imageNamed)(id, SEL, NSString *);
-static NSImage *SLDarkenedImage(NSImage *image, CGFloat scale)
-{
-    NSImage *copy = [[NSImage alloc] initWithSize:[image size]];
-    for (NSImageRep *rep in [image representations]) {
-        NSInteger w = [rep pixelsWide], h = [rep pixelsHigh];
-        if (w <= 0 || h <= 0) { [copy release]; return image; }
-        NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:w pixelsHigh:h bitsPerSample:8
-            samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:w * 4 bitsPerPixel:32];
-        [bitmap setSize:[rep size]];
-        [NSGraphicsContext saveGraphicsState];
-        [NSGraphicsContext setCurrentContext:[NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap]];
-        [rep drawInRect:NSMakeRect(0, 0, [rep size].width, [rep size].height)];
-        [NSGraphicsContext restoreGraphicsState];
-        unsigned char *p = [bitmap bitmapData];
-        for (NSInteger i = 0; i < w * h; i++, p += 4)      // premultiplied RGBA: scale the colour
-            for (int c = 0; c < 3; c++) p[c] = (unsigned char)lround(p[c] * scale);
-        [copy addRepresentation:bitmap];
-        [bitmap release];
-    }
-    return [copy autorelease];
-}
-
 // 10.6's own tab art (Safari 4's, taken from the install DVD at build time;
 // see build.sh), by the same names, where it has the image.
 static NSString *SLSnowLeopardTabPath(NSString *name)
@@ -737,39 +710,27 @@ static NSImage *SLRetonedTabButton(NSImage *image, NSString *referenceName)
 static id sl_imageNamed(id self, SEL _cmd, NSString *name)
 {
     NSImage *image = orig_imageNamed(self, _cmd, name);
-    if (!image || ![name isKindOfClass:[NSString class]]) return image;
-    if ([name hasPrefix:@"AW "] || [name hasPrefix:@"IW "]) {
-        static NSMutableDictionary *originals;
-        @synchronized ([NSImage class]) {
-            if (!originals) originals = [[NSMutableDictionary alloc] init];
-            id original = originals[name];
-            if (!original) {
-                NSString *prefix = [name substringToIndex:3], *rest = [name substringFromIndex:3];
-                // Finder's name for the tabs behind the selected one.
-                if ([rest isEqualToString:@"InactiveTabFill"]) rest = @"InactiveTabBG";
-                NSString *path = SLSnowLeopardTabPath([prefix stringByAppendingString:rest]);
-                if (path) original = [[[NSImage alloc] initWithContentsOfFile:path] autorelease];
-                else if ([rest isEqualToString:@"SingleTabAddButton"])
-                    original = SLRetonedTabButton(image, [prefix stringByAppendingString:@"InactiveTabBG"]);
-                else if ([rest isEqualToString:@"SingleTabAddButtonRollover"])
-                    original = SLRetonedTabButton(image, [prefix stringByAppendingString:@"AddTabButtonRolloverBG"]);
-                else if ([rest isEqualToString:@"SingleTabAddButtonPressed"])
-                    original = SLRetonedTabButton(image, [prefix stringByAppendingString:@"AddTabButtonRolloverBG Pressed"]);
-                originals[name] = original = original ?: (id)[NSNull null];
-            }
-            if (original != [NSNull null]) return original;
-        }
-    }
-    CGFloat scale;
-    if ([name hasPrefix:@"AW "]) scale = 168.0 / 175.0;
-    else if ([name hasPrefix:@"IW "]) scale = 216.0 / 223.0;
-    else return image;
+    if (!image || ![name isKindOfClass:[NSString class]] || !([name hasPrefix:@"AW "] || [name hasPrefix:@"IW "])) return image;
+
     static NSMutableDictionary *cache;
     @synchronized ([NSImage class]) {
         if (!cache) cache = [[NSMutableDictionary alloc] init];
-        NSImage *darkened = cache[name];
-        if (!darkened) cache[name] = darkened = SLDarkenedImage(image, scale);
-        return darkened;
+        id replacement = cache[name];
+        if (!replacement) {
+            NSString *prefix = [name substringToIndex:3], *rest = [name substringFromIndex:3];
+            // Finder's name for the tabs behind the selected one.
+            if ([rest isEqualToString:@"InactiveTabFill"]) rest = @"InactiveTabBG";
+            NSString *path = SLSnowLeopardTabPath([prefix stringByAppendingString:rest]);
+            if (path) replacement = [[[NSImage alloc] initWithContentsOfFile:path] autorelease];
+            else if ([rest isEqualToString:@"SingleTabAddButton"])
+                replacement = SLRetonedTabButton(image, [prefix stringByAppendingString:@"InactiveTabBG"]);
+            else if ([rest isEqualToString:@"SingleTabAddButtonRollover"])
+                replacement = SLRetonedTabButton(image, [prefix stringByAppendingString:@"AddTabButtonRolloverBG"]);
+            else if ([rest isEqualToString:@"SingleTabAddButtonPressed"])
+                replacement = SLRetonedTabButton(image, [prefix stringByAppendingString:@"AddTabButtonRolloverBG Pressed"]);
+            cache[name] = replacement = replacement ?: (id)[NSNull null];    // NSNull: an image 10.6 has nothing for
+        }
+        return replacement != [NSNull null] ? replacement : image;
     }
 }
 
@@ -828,7 +789,7 @@ static void SLSetUp(void)
     void *cuiDraw = dlsym(RTLD_DEFAULT, "CUIDraw");
     if (!hook || !cuiDraw) return;
     if (!SLLoadArt()) {
-        NSLog(@"SnowLeopardWindows: SLWindowArt.bin missing or unreadable; leaving window chrome alone.");
+        NSLog(@"SnowLeopardWindows: the bundle's art is missing or unreadable.");
         return;
     }
     SLHookAppearance();

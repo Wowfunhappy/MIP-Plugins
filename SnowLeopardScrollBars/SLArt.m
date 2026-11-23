@@ -43,14 +43,14 @@ static inline uint16_t LE16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] <
 
 // SLScrollArt@2x.bin: "SLSA", uint32 count, then per image uint16 name length,
 // name ("<resID>/<index>"), uint16 width, uint16 height, premultiplied ARGB.
-static void SLTwinArtLoad(void)
+static BOOL SLTwinArtLoad(void)
 {
     Class cls = objc_getClass("SLScrollBars");
     NSString *path = cls ? [[NSBundle bundleForClass:cls] pathForResource:@"SLScrollArt@2x" ofType:@"bin"] : nil;
     NSData *data = path ? [NSData dataWithContentsOfFile:path] : nil;
     const uint8_t *d = [data bytes];
     size_t len = [data length], p = 8;
-    if (len < 8 || memcmp(d, "SLSA", 4) != 0) return;
+    if (len < 8 || memcmp(d, "SLSA", 4) != 0) return NO;
     uint32_t count = OSReadLittleInt32(d, 4);
 
     gTwinArt = CFDictionaryCreateMutable(NULL, count, NULL, &kCFTypeDictionaryValueCallBacks);
@@ -78,14 +78,14 @@ static void SLTwinArtLoad(void)
         }
         p = start + size;
     }
+    return YES;
 }
 
 BOOL SLArtLoad(void)
 {
     if (gRsrc) return YES;
 
-    NSString *path = [[NSBundle bundleWithIdentifier:@"com.apple.HIToolbox"] pathForResource:@"Extras2" ofType:@"rsrc"];
-    if (!path) path = @"/System/Library/Frameworks/Carbon.framework/Frameworks/HIToolbox.framework/Resources/Extras2.rsrc";
+    NSString *path = @"/System/Library/Frameworks/Carbon.framework/Frameworks/HIToolbox.framework/Resources/Extras2.rsrc";
     NSData *data = [[NSData alloc] initWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:NULL];
     if (!data || [data length] < 256) { [data release]; return NO; }
 
@@ -123,7 +123,7 @@ BOOL SLArtLoad(void)
     gPxmOffsets = offsets;
     gImageCache = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
     gColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceGenericRGB);
-    SLTwinArtLoad();
+    if (!SLTwinArtLoad()) return NO;
 
     // Make sure the pieces every scroll bar needs are really there before we
     // take over any drawing.
@@ -186,7 +186,7 @@ CGImageRef SLThemeImage(int kind, int state, int dir, int tint, int index, BOOL 
             image = SLCreatePxmImage(resID, imageIndex);
             if (image) {
                 CFDictionarySetValue(gImageCache, cacheKey, image);   // cache owns it
-                CGImageRef twin = gTwinArt ? (CGImageRef)CFDictionaryGetValue(gTwinArt, cacheKey) : NULL;
+                CGImageRef twin = (CGImageRef)CFDictionaryGetValue(gTwinArt, cacheKey);
                 if (twin && CGImageGetWidth(twin) == 2 * CGImageGetWidth(image) && CGImageGetHeight(twin) == 2 * CGImageGetHeight(image))
                     CFDictionarySetValue(gTwinOf, image, twin);
             }
