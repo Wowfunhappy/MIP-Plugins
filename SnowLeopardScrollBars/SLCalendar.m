@@ -20,7 +20,10 @@
 //  CalUISizeBasedDateContentsTextLayer in the Day view, directly in the
 //  content view's layer, right-aligned by Calendar near the window's edge)
 //  is moved left so its right edge lines up with the grid's.
-//  With overlay scrollers everything is left (or put back) as Calendar has it.
+//  All of it follows each scroll view's style: when scroll bars switch to
+//  overlay ("when scrolling"), even with Calendar running, the scroller goes
+//  back into its scroll view, the stubs are shown again and the heading moves
+//  back; it's all redone if they switch back.
 //
 
 #import "SLScrollBars.h"
@@ -32,11 +35,16 @@ static Class gSwipeScrollView, gHeadingLayer;
 static void (*orig_heading_setPosition)(id, SEL, CGPoint);
 static void (*orig_heading_setBounds)(id, SEL, CGRect);
 static void (*orig_heading_setFrame)(id, SEL, CGRect);
-static char kSLGridRight;           // per content view: where the grid ends (content view coordinates)
+static char kSLGridRight;           // per content view: where the grid ends (content view coordinates), legacy only
+static char kSLHeadingShift;        // per heading layer: how far it has been moved from where Calendar put it
+static char kSLHeadingPlaced;       // ...and the position it was moved to
+static char kSLHiddenByUs;          // per scroller: hidden by us (an all-day or header stub)
 
-static BOOL SLCalendarUsesLegacyScrollers(void)
+// Legacy (Snow Leopard) scroll bars in this scroll view? Its own style, so a
+// change of setting is followed as AppKit restyles each scroll view.
+static BOOL SLCalendarIsLegacy(NSScrollView *scrollView)
 {
-    return SLIsEnabled() && [NSScroller preferredScrollerStyle] == NSScrollerStyleLegacy;
+    return SLIsEnabled() && [scrollView scrollerStyle] == NSScrollerStyleLegacy;
 }
 
 // The Day or Week content view a view is in, if any.
@@ -49,22 +57,46 @@ static NSView *SLCalendarContentView(NSView *view)
     return nil;
 }
 
-// Puts the heading's right edge on the grid's, if this is a content view's heading.
+// A content view's heading: its right edge on the grid's while the content
+// view has legacy scroll bars, otherwise back where Calendar put it.
 static void SLCalendarAlignHeading(CALayer *heading)
 {
     id delegate = [[heading superlayer] delegate];
     if (![delegate isKindOfClass:[NSView class]] || SLCalendarContentView(delegate) != delegate) return;
-    NSNumber *gridRight = SLCalendarUsesLegacyScrollers() ? objc_getAssociatedObject(delegate, &kSLGridRight) : nil;
-    if (!gridRight) return;
-    CGFloat dx = [gridRight doubleValue] - CGRectGetMaxX([heading frame]);
+    NSNumber *gridRight = objc_getAssociatedObject(delegate, &kSLGridRight);
+    CGFloat shift = [objc_getAssociatedObject(heading, &kSLHeadingShift) doubleValue];
+    CGFloat dx = gridRight ? [gridRight doubleValue] - CGRectGetMaxX([heading frame]) : -shift;
     if (fabs(dx) < 0.25) return;
     CGPoint position = [heading position];
-    orig_heading_setPosition(heading, @selector(setPosition:), CGPointMake(position.x + dx, position.y));
+    CGPoint placed = CGPointMake(position.x + dx, position.y);
+    orig_heading_setPosition(heading, @selector(setPosition:), placed);
+    shift += dx;
+    BOOL moved = fabs(shift) >= 0.25;
+    objc_setAssociatedObject(heading, &kSLHeadingShift, moved ? @(shift) : nil, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(heading, &kSLHeadingPlaced, moved ? [NSValue valueWithPoint:NSPointFromCGPoint(placed)] : nil, OBJC_ASSOCIATION_RETAIN);
+}
+
+// Calendar setting the heading's position: a new placement of its own, unless
+// it is just setting it again where we put it (it does that).
+static void SLCalendarHeadingPlaced(CALayer *heading)
+{
+    NSValue *placed = objc_getAssociatedObject(heading, &kSLHeadingPlaced);
+    if (placed && CGPointEqualToPoint(NSPointToCGPoint([placed pointValue]), [heading position])) return;
+    objc_setAssociatedObject(heading, &kSLHeadingShift, nil, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(heading, &kSLHeadingPlaced, nil, OBJC_ASSOCIATION_RETAIN);
+}
+
+static void SLCalendarAlignHeadings(NSView *content)
+{
+    if (!gHeadingLayer) return;
+    for (CALayer *layer in [[[content layer] sublayers] copy])
+        if ([layer isKindOfClass:gHeadingLayer]) SLCalendarAlignHeading(layer);
 }
 
 static void sl_heading_setPosition(CALayer *self, SEL _cmd, CGPoint position)
 {
     orig_heading_setPosition(self, _cmd, position);
+    SLCalendarHeadingPlaced(self);
     SLCalendarAlignHeading(self);
 }
 
@@ -77,6 +109,7 @@ static void sl_heading_setBounds(CALayer *self, SEL _cmd, CGRect bounds)
 static void sl_heading_setFrame(CALayer *self, SEL _cmd, CGRect frame)
 {
     orig_heading_setFrame(self, _cmd, frame);
+    SLCalendarHeadingPlaced(self);
     SLCalendarAlignHeading(self);
 }
 
@@ -86,13 +119,19 @@ static void SLCalendarArrange(NSScrollView *scrollView)
     NSScroller *scroller = [scrollView verticalScroller];
     if (!content || !scroller) return;
 
-    if (!SLCalendarUsesLegacyScrollers()) {
-        // Overlay scrollers: Calendar's own layout (the heading goes back at
-        // Calendar's next layout of it).
-        objc_setAssociatedObject(content, &kSLGridRight, nil, OBJC_ASSOCIATION_RETAIN);
+    if (!SLCalendarIsLegacy(scrollView)) {
+        // Overlay scrollers: undo everything, back to Calendar's own layout.
+        if (objc_getAssociatedObject(scroller, &kSLHiddenByUs)) {
+            objc_setAssociatedObject(scroller, &kSLHiddenByUs, nil, OBJC_ASSOCIATION_RETAIN);
+            [scroller setHidden:NO];
+        }
         if ([scroller superview] != scrollView) {
             [scrollView addSubview:scroller];
             [scrollView tile];
+        }
+        if (objc_getAssociatedObject(content, &kSLGridRight)) {
+            objc_setAssociatedObject(content, &kSLGridRight, nil, OBJC_ASSOCIATION_RETAIN);
+            SLCalendarAlignHeadings(content);
         }
         return;
     }
@@ -107,17 +146,17 @@ static void SLCalendarArrange(NSScrollView *scrollView)
             timeline = NO;
     }
     if (!timeline) {
-        [scroller setHidden:YES];       // under the timeline's full-height scroller
+        if (![scroller isHidden]) {     // under the timeline's full-height scroller
+            [scroller setHidden:YES];
+            objc_setAssociatedObject(scroller, &kSLHiddenByUs, @YES, OBJC_ASSOCIATION_RETAIN);
+        }
         return;
     }
 
     // Where the grid ends, for the heading.
     NSRect grid = [content convertRect:[[scrollView contentView] frame] fromView:scrollView];
     objc_setAssociatedObject(content, &kSLGridRight, @(NSMaxX(grid)), OBJC_ASSOCIATION_RETAIN);
-    if (gHeadingLayer) {
-        for (CALayer *layer in [[[content layer] sublayers] copy])
-            if ([layer isKindOfClass:gHeadingLayer]) SLCalendarAlignHeading(layer);
-    }
+    SLCalendarAlignHeadings(content);
 
     if ([scroller superview] != content) [content addSubview:scroller];
     NSRect bounds = [content bounds];
