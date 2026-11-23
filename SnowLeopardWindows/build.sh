@@ -12,6 +12,10 @@
 # resolution-independent recipes (UI.bundle, next to ArtFile.bin) with
 # Mavericks' own renderer; see render_hidpi.m. That step needs OS X 10.9.
 # Without UI.bundle the plugin is built with 1x buttons only.
+#
+# Safari's and Finder's tabs use Safari 4's tab images (the "AW"/"IW" PNGs),
+# taken from Safari.pkg on the same install DVD (or SL_SAFARIPKG). Without it
+# the plugin darkens Mavericks' own tab images to suit 10.6's toolbar instead.
 set -e
 cd "$(dirname "$0")"
 
@@ -27,6 +31,9 @@ if [ ! -f "$ARTFILE" ]; then
 fi
 
 UIBUNDLE="$(dirname "$ARTFILE")/UI.bundle"
+# The DVD's root: ArtFile.bin is in System/Library/PrivateFrameworks/CoreUI.framework/Versions/A/Resources.
+DVDROOT="$(cd "$(dirname "$ARTFILE")/../../../../../../.." 2>/dev/null && pwd)"
+SAFARIPKG="${SL_SAFARIPKG:-$DVDROOT/System/Installation/Packages/Safari.pkg}"
 
 rm -rf "$BUNDLE" build/tools
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources" build/tools
@@ -42,6 +49,16 @@ if [ -d "$UIBUNDLE/Contents/Recipes" ]; then
         "$BUNDLE/Contents/Resources/SLWindowArt@2x.bin"
 else
     echo "No UI.bundle next to ArtFile.bin: building with 1x buttons only." >&2
+fi
+
+if [ -f "$SAFARIPKG" ]; then
+    mkdir -p build/tools/safari "$BUNDLE/Contents/Resources/SLTabArt"
+    (cd build/tools/safari && xar -xf "$SAFARIPKG" Payload && gzip -dc Payload |
+        cpio -id './Applications/Safari.app/Contents/Resources/AW *.png' './Applications/Safari.app/Contents/Resources/IW *.png' 2>/dev/null)
+    cp build/tools/safari/Applications/Safari.app/Contents/Resources/[AI]W\ *.png "$BUNDLE/Contents/Resources/SLTabArt/"
+    rm -rf build/tools/safari
+else
+    echo "No Safari.pkg at $SAFARIPKG: tabs will use darkened Mavericks art." >&2
 fi
 
 clang -bundle -arch i386 -arch x86_64 -mmacosx-version-min=10.9 \

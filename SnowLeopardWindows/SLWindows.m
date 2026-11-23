@@ -603,13 +603,17 @@ static void SLHookTextured(void)
 //
 // Safari's and Finder's tab bars are drawn from images of their own, named
 // "AW ..." in the main window and "IW ..." in others (the selected tab, the
-// others behind it, close and add buttons), made to continue Mavericks'
-// toolbar: the selected tab is the colour of the toolbar's bottom edge. 10.6's
-// toolbar ends darker, so the selected tab showed as a lighter band below it:
-// on screen the selected tab is about 175 (223 in an inactive window) where
-// 10.6's toolbar ends at 168 (216). The images are darkened by that ratio,
-// everything in them alike, so the tabs keep their relationships to each
-// other and meet 10.6's toolbar.
+// others behind it, close and add buttons), made to continue the toolbar: the
+// selected tab hangs from it. Mavericks' are Safari 4's images, of the same
+// names, retextured; so +[NSImage imageNamed:] hands out Safari 4's own (from
+// the 10.6 install DVD; see build.sh), which continue 10.6's toolbar exactly.
+// Finder calls the tabs behind the selected one "InactiveTabFill" (Safari 4:
+// "InactiveTabBG"). The one image 10.6 has no counterpart for, the tab-shaped
+// new-tab button shown with a single tab, keeps its outline in 10.6's tones.
+//
+// Without Safari 4's images, Mavericks' are darkened to suit 10.6's toolbar,
+// which ends darker: the selected tab is about 175 on screen (223 in an
+// inactive window) where 10.6's toolbar ends at 168 (216).
 
 static id (*orig_imageNamed)(id, SEL, NSString *);
 static NSImage *SLDarkenedImage(NSImage *image, CGFloat scale)
@@ -634,10 +638,128 @@ static NSImage *SLDarkenedImage(NSImage *image, CGFloat scale)
     return [copy autorelease];
 }
 
+// 10.6's own tab art (Safari 4's, taken from the install DVD at build time;
+// see build.sh), by the same names, where it has the image.
+static NSString *SLSnowLeopardTabPath(NSString *name)
+{
+    NSString *dir = [[[NSBundle bundleForClass:[SLWindows class]] resourcePath] stringByAppendingPathComponent:@"SLTabArt"];
+    NSString *path = [[dir stringByAppendingPathComponent:name] stringByAppendingPathExtension:@"png"];
+    return [[NSFileManager defaultManager] fileExistsAtPath:path] ? path : nil;
+}
+
+static NSBitmapImageRep *SLBitmapOf(NSImageRep *rep)
+{
+    NSInteger w = [rep pixelsWide], h = [rep pixelsHigh];
+    if (w <= 0 || h <= 0) return nil;
+    NSBitmapImageRep *bitmap = [[[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:w pixelsHigh:h bitsPerSample:8
+        samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:w * 4 bitsPerPixel:32] autorelease];
+    [bitmap setSize:[rep size]];
+    [NSGraphicsContext saveGraphicsState];
+    [NSGraphicsContext setCurrentContext:[NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap]];
+    [rep drawInRect:NSMakeRect(0, 0, [rep size].width, [rep size].height)];
+    [NSGraphicsContext restoreGraphicsState];
+    return bitmap;
+}
+
+// The rows of an image's last column, as gray (premultiplied, so where opaque).
+static int SLColumnRows(NSBitmapImageRep *bitmap, double *gray, int max)
+{
+    int w = (int)[bitmap pixelsWide], h = MIN(max, (int)[bitmap pixelsHigh]);
+    unsigned char *p = [bitmap bitmapData];
+    for (int y = 0; y < h; y++) gray[y] = p[(y * w + w - 1) * 4 + 1];
+    return h;
+}
+
+// Mavericks' tab-shaped new-tab button (shown at the end of the bookmarks bar
+// when there is one tab), which 10.6 has no image for, in 10.6's tones: its
+// outline kept, its noise texture removed, and each row recoloured to the
+// matching row of a 10.6 tab image - top border, gradient, bottom highlight -
+// with the + keeping its relative darkness.
+static NSImage *SLRetonedTabButton(NSImage *image, NSString *referenceName)
+{
+    NSString *path = SLSnowLeopardTabPath(referenceName);
+    NSImage *reference = path ? [[[NSImage alloc] initWithContentsOfFile:path] autorelease] : nil;
+    NSBitmapImageRep *ref = [[reference representations] count] ? SLBitmapOf([[reference representations] objectAtIndex:0]) : nil;
+    if (!ref) return nil;
+    double refRows[256];
+    int refH = SLColumnRows(ref, refRows, 256);
+    int rt = -1, rb = -1;             // the reference's top border and bottom highlight rows (its opaque span)
+    unsigned char *rp = [ref bitmapData];
+    for (int y = 0; y < refH; y++) {
+        if (rp[(y * [ref pixelsWide] + [ref pixelsWide] - 1) * 4 + 3] > 240) { if (rt < 0) rt = y; rb = y; }
+    }
+    if (rt < 0 || rb - rt < 3) return nil;
+
+    NSImage *copy = [[[NSImage alloc] initWithSize:[image size]] autorelease];
+    for (NSImageRep *rep in [image representations]) {
+        NSBitmapImageRep *bitmap = SLBitmapOf(rep);
+        if (!bitmap) return nil;
+        int w = (int)[bitmap pixelsWide], h = (int)[bitmap pixelsHigh];
+        unsigned char *p = [bitmap bitmapData];
+        // The button's own opaque span, along its last column.
+        int t = -1, b = -1;
+        for (int y = 0; y < h; y++) if (p[(y * w + w - 1) * 4 + 3] > 240) { if (t < 0) t = y; b = y; }
+        if (t < 0 || b - t < 3) return nil;
+        for (int y = t; y <= b; y++) {
+            // This row's body tone: the median of its opaque right half.
+            int hist[256] = { 0 }, n = 0;
+            for (int x = w / 2; x < w; x++) if (p[(y * w + x) * 4 + 3] > 240) { hist[p[(y * w + x) * 4 + 1]]++; n++; }
+            if (!n) continue;
+            int median = 0;
+            for (int c = 0, k = 0; c < 256; c++) { k += hist[c]; if (k * 2 >= n) { median = c; break; } }
+            // The matching reference row: border to border, gradient to gradient.
+            double target;
+            if (y == t) target = refRows[rt];
+            else if (y == b) target = refRows[rb];
+            else {
+                double f = (double)(y - t - 1) / MAX(1, b - t - 2);
+                double r = (rt + 1) + f * ((rb - 1) - (rt + 1));
+                int r0 = (int)floor(r), r1 = MIN(r0 + 1, rb - 1);
+                target = refRows[r0] + (r - r0) * (refRows[r1] - refRows[r0]);
+            }
+            double delta = target - median;
+            for (int x = 0; x < w; x++) {
+                unsigned char *q = p + (y * w + x) * 4;
+                if (!q[3]) continue;
+                double a = q[3] / 255.0, v = q[1];
+                // Body pixels (close to the row's tone; the outline and the +
+                // differ by far more than the noise does) lose their noise.
+                if (q[3] > 240 && fabs(v - median) < 14) v = median;
+                v = MAX(0, MIN(255 * a, v + delta * a));
+                q[0] = q[1] = q[2] = (unsigned char)lround(v);
+            }
+        }
+        [copy addRepresentation:bitmap];
+    }
+    return copy;
+}
+
 static id sl_imageNamed(id self, SEL _cmd, NSString *name)
 {
     NSImage *image = orig_imageNamed(self, _cmd, name);
     if (!image || ![name isKindOfClass:[NSString class]]) return image;
+    if ([name hasPrefix:@"AW "] || [name hasPrefix:@"IW "]) {
+        static NSMutableDictionary *originals;
+        @synchronized ([NSImage class]) {
+            if (!originals) originals = [[NSMutableDictionary alloc] init];
+            id original = originals[name];
+            if (!original) {
+                NSString *prefix = [name substringToIndex:3], *rest = [name substringFromIndex:3];
+                // Finder's name for the tabs behind the selected one.
+                if ([rest isEqualToString:@"InactiveTabFill"]) rest = @"InactiveTabBG";
+                NSString *path = SLSnowLeopardTabPath([prefix stringByAppendingString:rest]);
+                if (path) original = [[[NSImage alloc] initWithContentsOfFile:path] autorelease];
+                else if ([rest isEqualToString:@"SingleTabAddButton"])
+                    original = SLRetonedTabButton(image, [prefix stringByAppendingString:@"InactiveTabBG"]);
+                else if ([rest isEqualToString:@"SingleTabAddButtonRollover"])
+                    original = SLRetonedTabButton(image, [prefix stringByAppendingString:@"AddTabButtonRolloverBG"]);
+                else if ([rest isEqualToString:@"SingleTabAddButtonPressed"])
+                    original = SLRetonedTabButton(image, [prefix stringByAppendingString:@"AddTabButtonRolloverBG Pressed"]);
+                originals[name] = original = original ?: (id)[NSNull null];
+            }
+            if (original != [NSNull null]) return original;
+        }
+    }
     CGFloat scale;
     if ([name hasPrefix:@"AW "]) scale = 168.0 / 175.0;
     else if ([name hasPrefix:@"IW "]) scale = 216.0 / 223.0;
