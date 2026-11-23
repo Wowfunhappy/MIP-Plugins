@@ -84,6 +84,7 @@ void SLCalendarInstall(void);       // Calendar's Day and Week views
 // ---- SLSkinned.m -----------------------------------------------------------
 
 void SLSkinnedInstall(void);
+void SLCarbonInstall(void);           // Carbon (HIToolbox) scroll bars (SLCarbon.m)
 void SLPrefPaneInstall(void);         // System Preferences: 10.6's "Place scroll arrows:" (SLPrefPane.m)
 BOOL SLLionSkin(NSScroller *scroller);             // an app's own skin, made for Lion's arrowless scroll bars
 BOOL SLProKitScroller(NSScroller *scroller);       // ProKit's: it draws, with 10.6's geometry

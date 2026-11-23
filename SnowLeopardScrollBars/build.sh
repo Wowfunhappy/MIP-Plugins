@@ -28,8 +28,8 @@ cp -R ApertureArt "$BUNDLE/Contents/Resources/"
 
 clang -bundle -arch i386 -arch x86_64 -mmacosx-version-min=10.9 \
     -Os -Wall -Wno-deprecated-declarations -fno-objc-arc \
-    -framework Cocoa -framework QuartzCore \
+    -framework Cocoa -framework QuartzCore -framework Carbon \
     -o "$BUNDLE/Contents/MacOS/$NAME" \
-    SLScrollBars.m SLDraw.m SLWebKit.m SLArt.m SLCalendar.m SLSkinned.m SLPrefPane.m
+    SLScrollBars.m SLDraw.m SLWebKit.m SLArt.m SLCalendar.m SLSkinned.m SLPrefPane.m SLCarbon.m
 
 echo "Built $BUNDLE"

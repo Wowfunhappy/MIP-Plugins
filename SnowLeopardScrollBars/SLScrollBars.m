@@ -1028,6 +1028,7 @@ BOOL SLHook(Class cls, SEL sel, IMP replacement, IMP *original)
     SLCalendarInstall();
     SLSkinnedInstall();
     SLPrefPaneInstall();
+    SLCarbonInstall();
 
     [[NSDistributedNotificationCenter defaultCenter] addObserver:self
                                                         selector:@selector(arrowVariantChanged:)
