@@ -30,6 +30,7 @@
 //
 
 #import "SLScrollBars.h"
+#import <mach-o/dyld.h>
 #import <libkern/OSAtomic.h>
 
 static Class gRemindersScroller;
@@ -51,6 +52,52 @@ static SLSkin SLSkinOf(NSScroller *scroller)
 BOOL SLSkinHandled(NSScroller *scroller)
 {
     return SLSkinOf(scroller) != kSLSkinNone;
+}
+
+// ProKit (Apple's framework for its pro apps: Aperture, Final Cut, Logic...)
+// draws its scrollers itself - track, thumb and arrows, in its own art - and
+// lays them out with AppKit's geometry, arrows included. Mavericks' AppKit has
+// no arrows in legacy scroll bars, and apps made for Lion ask ProKit
+// (-[NSApplication wantsScrollerTrackEndcaps]) for its arrowless style, with
+// rounded ends to the track. With 10.6's geometry back, and that style off
+// (-[NSProScroller _shouldDrawTrackEndcaps]), ProKit draws its arrows as it did
+// on 10.6.
+static Class gProScroller;
+static BOOL (*orig_pro_shouldDrawTrackEndcaps)(id, SEL);
+
+// A ProKit scroller - unless its class draws itself in its own -drawRect:
+// (Aperture's full-screen RKFullScreenBlackScroller, whose 10.6 arrows are no
+// longer in the app), which is left alone like any app's own skin.
+BOOL SLProKitScroller(NSScroller *scroller)
+{
+    if (!gProScroller || ![scroller isKindOfClass:gProScroller]) return NO;
+    return class_getMethodImplementation(object_getClass(scroller), @selector(drawRect:))
+        == class_getMethodImplementation(gProScroller, @selector(drawRect:));
+}
+
+static BOOL sl_pro_shouldDrawTrackEndcaps(NSScroller *self, SEL _cmd)
+{
+    if (SLIsEnabled() && [self scrollerStyle] == NSScrollerStyleLegacy) return NO;
+    return orig_pro_shouldDrawTrackEndcaps(self, _cmd);
+}
+
+// ProKit may be loaded after the plugin (it's a framework in the app), so this
+// is tried again when images load.
+static void SLProKitInstall(void)
+{
+    if (gProScroller) return;
+    Class cls = NSClassFromString(@"NSProScroller");
+    const char *image = cls ? class_getImageName(cls) : NULL;
+    if (!image || !strstr(image, "/ProKit.framework/") || ![cls isSubclassOfClass:[NSScroller class]]) return;
+    Method m = class_getInstanceMethod(cls, sel_registerName("_shouldDrawTrackEndcaps"));
+    if (!m || strncmp(method_getTypeEncoding(m), "c", 1) != 0) return;
+    orig_pro_shouldDrawTrackEndcaps = (void *)method_setImplementation(m, (IMP)sl_pro_shouldDrawTrackEndcaps);
+    gProScroller = cls;
+}
+
+static void SLImageAdded(const struct mach_header *header, intptr_t slide)
+{
+    SLProKitInstall();
 }
 
 static BOOL SLOverrides(Class cls, Class base, SEL sel, BOOL classMethod)
@@ -234,6 +281,8 @@ void SLSkinnedPaintArrow(NSScroller *scroller, const SLState *st, NSScrollerArro
 
 void SLSkinnedInstall(void)
 {
+    SLProKitInstall();
+    if (!gProScroller) _dyld_register_func_for_add_image(SLImageAdded);
     NSString *app = [[NSBundle mainBundle] bundleIdentifier];
     Class cls;
     if ([app isEqualToString:@"com.apple.reminders"] && (cls = NSClassFromString(@"RemindersLegacyScroller")) && [cls isSubclassOfClass:[NSScroller class]])

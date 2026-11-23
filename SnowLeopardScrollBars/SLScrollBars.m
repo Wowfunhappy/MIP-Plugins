@@ -102,7 +102,7 @@ static BOOL SLHasCustomAppearance(NSView *view)
 static inline BOOL SLIsLegacy(NSScroller *scroller)
 {
     return gEnabled && [scroller scrollerStyle] == NSScrollerStyleLegacy
-        && (SLSkinHandled(scroller) || (!SLLionSkin(scroller) && !SLHasCustomAppearance(scroller)));
+        && (SLSkinHandled(scroller) || SLProKitScroller(scroller) || (!SLLionSkin(scroller) && !SLHasCustomAppearance(scroller)));
 }
 
 int SLArrowConfig(void) { return gArrowConfig; }
