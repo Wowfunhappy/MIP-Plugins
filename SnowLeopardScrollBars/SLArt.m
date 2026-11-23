@@ -10,6 +10,13 @@
 //  The resource lookup (ThemeTable.inc) and image construction below mirror
 //  AppKit 1038's ReadThemeInfo.m: _GetThemeImage / _NSReadThemeImageFromRsrc.
 //
+//  Retina: the bundle may carry SLScrollArt@2x.bin, a twin at twice the size
+//  for each pixmap, rendered at build time from Snow Leopard's CoreUI art (see
+//  hidpi/build_hidpi.py). Every drawing primitive below goes through
+//  SLDrawImagePart, which draws the twin instead when the context has two or
+//  more device pixels per point. Geometry is unchanged: the twin covers
+//  exactly what the pixmap would.
+//
 
 #import "SLScrollBars.h"
 
@@ -26,10 +33,51 @@ static uint32_t gDataOffset = 0;
 static CFMutableDictionaryRef gPxmOffsets = NULL;   // resID -> offset of resource data
 static CFMutableDictionaryRef gImageCache = NULL;   // (resID<<16 | index) -> CGImageRef
 static CGColorSpaceRef gColorSpace = NULL;
+static CFMutableDictionaryRef gTwinArt = NULL;      // (resID<<16 | index) -> 2x CGImageRef
+static CFMutableDictionaryRef gTwinOf = NULL;       // 1x CGImageRef -> its 2x twin
 
 static inline uint32_t BE32(const uint8_t *p) { return ((uint32_t)p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]; }
 static inline uint16_t BE16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
 static inline uint16_t LE16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+
+// SLScrollArt@2x.bin: "SLSA", uint32 count, then per image uint16 name length,
+// name ("<resID>/<index>"), uint16 width, uint16 height, premultiplied ARGB.
+static void SLTwinArtLoad(void)
+{
+    Class cls = objc_getClass("SLScrollBars");
+    NSString *path = cls ? [[NSBundle bundleForClass:cls] pathForResource:@"SLScrollArt@2x" ofType:@"bin"] : nil;
+    NSData *data = path ? [NSData dataWithContentsOfFile:path] : nil;
+    const uint8_t *d = [data bytes];
+    size_t len = [data length], p = 8;
+    if (len < 8 || memcmp(d, "SLSA", 4) != 0) return;
+    uint32_t count = OSReadLittleInt32(d, 4);
+
+    gTwinArt = CFDictionaryCreateMutable(NULL, count, NULL, &kCFTypeDictionaryValueCallBacks);
+    gTwinOf = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
+    for (uint32_t i = 0; i < count && p + 2 <= len; i++) {
+        uint16_t n = OSReadLittleInt16(d, p);
+        if (p + 2 + n + 4 > len || n > 31) break;
+        char name[32];
+        memcpy(name, d + p + 2, n);
+        name[n] = 0;
+        uint16_t w = OSReadLittleInt16(d, p + 2 + n), h = OSReadLittleInt16(d, p + 4 + n);
+        size_t start = p + 6 + n, size = (size_t)w * h * 4;
+        if (start + size > len) break;
+        int resID, index;
+        if (sscanf(name, "%d/%d", &resID, &index) == 2) {
+            CFDataRef pixels = CFDataCreate(NULL, d + start, size);
+            CGDataProviderRef provider = CGDataProviderCreateWithCFData(pixels);
+            CGImageRef image = CGImageCreate(w, h, 8, 32, w * 4, gColorSpace,
+                                             kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Big,
+                                             provider, NULL, true, kCGRenderingIntentDefault);
+            if (image) CFDictionarySetValue(gTwinArt, (void *)(uintptr_t)(((uint32_t)resID << 16) | (index & 0xffff)), image);
+            CGImageRelease(image);
+            CGDataProviderRelease(provider);
+            CFRelease(pixels);
+        }
+        p = start + size;
+    }
+}
 
 BOOL SLArtLoad(void)
 {
@@ -74,6 +122,7 @@ BOOL SLArtLoad(void)
     gPxmOffsets = offsets;
     gImageCache = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
     gColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceGenericRGB);
+    SLTwinArtLoad();
 
     // Make sure the pieces every scroll bar needs are really there before we
     // take over any drawing.
@@ -134,7 +183,12 @@ CGImageRef SLThemeImage(int kind, int state, int dir, int tint, int index, BOOL 
         CGImageRef image = (CGImageRef)CFDictionaryGetValue(gImageCache, cacheKey);
         if (!image) {
             image = SLCreatePxmImage(resID, imageIndex);
-            if (image) CFDictionarySetValue(gImageCache, cacheKey, image);   // cache owns it
+            if (image) {
+                CFDictionarySetValue(gImageCache, cacheKey, image);   // cache owns it
+                CGImageRef twin = gTwinArt ? (CGImageRef)CFDictionaryGetValue(gTwinArt, cacheKey) : NULL;
+                if (twin && CGImageGetWidth(twin) == 2 * CGImageGetWidth(image) && CGImageGetHeight(twin) == 2 * CGImageGetHeight(image))
+                    CFDictionarySetValue(gTwinOf, image, twin);
+            }
         }
         return image;
     }
@@ -163,6 +217,16 @@ void SLDrawImagePart(CGImageRef image, NSRect src, NSRect dst, BOOL flipped)
 
     CGFloat h = CGImageGetHeight(image);
     CGRect crop = CGRectMake(src.origin.x, h - NSMaxY(src), src.size.width, src.size.height);
+
+    // On a Retina display (two or more device pixels per point), the 2x twin.
+    CGImageRef twin = gTwinOf ? (CGImageRef)CFDictionaryGetValue(gTwinOf, image) : NULL;
+    if (twin) {
+        CGAffineTransform m = CGContextGetUserSpaceToDeviceSpaceTransform(ctx);
+        if (sqrt(m.a * m.a + m.b * m.b) >= 1.5 && sqrt(m.c * m.c + m.d * m.d) >= 1.5) {
+            image = twin;
+            crop = CGRectMake(2 * crop.origin.x, 2 * crop.origin.y, 2 * crop.size.width, 2 * crop.size.height);
+        }
+    }
     CGImageRef piece = CGImageCreateWithImageInRect(image, crop);
     if (!piece) return;
 
