@@ -73,9 +73,32 @@ static ptrdiff_t gSFlags2Offset = 0;     // NSScroller._sFlags2
 #define kSFlags2HitPartMask 0x000f
 #define kSFlags2MaxEndHit   0x0040      // DoubleBoth: the pressed arrow is in the max-end pair
 
+// Apps can give a window or view an NSAppearance of their own, drawn from a
+// CoreUI catalog of their own (Reminders' leather, for one); scrollers there
+// are part of the app's look and are left to it, as SnowLeopardWindows leaves
+// such windows' chrome.
+static BOOL SLHasCustomAppearance(NSView *view)
+{
+    static SEL isDefault;
+    static BOOL available;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        isDefault = sel_registerName("_isDefaultAppearance");
+        available = [NSView instancesRespondToSelector:@selector(appearance)] && [NSWindow instancesRespondToSelector:@selector(appearance)]
+                 && [NSClassFromString(@"NSAppearance") instancesRespondToSelector:isDefault];
+    });
+    if (!available) return NO;
+    for (NSView *v = view; v; v = [v superview]) {
+        id appearance = [v appearance];
+        if (appearance) return !((BOOL (*)(id, SEL))objc_msgSend)(appearance, isDefault);
+    }
+    id appearance = [[view window] appearance];
+    return appearance && !((BOOL (*)(id, SEL))objc_msgSend)(appearance, isDefault);
+}
+
 static inline BOOL SLIsLegacy(NSScroller *scroller)
 {
-    return gEnabled && [scroller scrollerStyle] == NSScrollerStyleLegacy;
+    return gEnabled && [scroller scrollerStyle] == NSScrollerStyleLegacy && !SLHasCustomAppearance(scroller);
 }
 
 int SLArrowConfig(void) { return gArrowConfig; }

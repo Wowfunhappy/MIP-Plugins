@@ -48,11 +48,19 @@
 //  bar plus 2 points (Mavericks extends it by 75), and the window's background
 //  pattern, which some views paint behind themselves, is drawn the same way.
 //
+//  Apps with their own look: an app can give a window its own NSAppearance,
+//  built from a CoreUI catalog of its own (Reminders' leather, for one); CoreUI
+//  then draws that window's chrome with the appearance's renderer. Those
+//  renderers are passed through untouched, and such windows also keep
+//  Mavericks' button positions, title and textured background: only the
+//  standard (default) appearance gets Snow Leopard's.
+//
 
 #import <Cocoa/Cocoa.h>
 #import <dlfcn.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <libkern/OSAtomic.h>
 
 // CUIDraw returns an OSStatus (callers such as HIToolbox's menu drawing check it).
 typedef OSStatus (*SLCUIDrawFn)(CFTypeRef renderer, CGRect rect, CGContextRef ctx, CFDictionaryRef options, CFDictionaryRef *result);
@@ -293,6 +301,57 @@ static void SLDrawTitleBar(CGRect rect, CGContextRef ctx, NSDictionary *o)
     CGContextRestoreGState(ctx);
 }
 
+// ---- windows with their own appearance ---------------------------------------------------
+
+// The CoreUI renderers of non-default NSAppearances (an app's own theme), as
+// they are handed out; CUIDraw passes their drawing through unchanged.
+static CFMutableSetRef gCustomRenderers;
+static OSSpinLock gCustomRenderersLock = OS_SPINLOCK_INIT;
+static void *(*orig_coreUIRenderer)(id, SEL);
+
+static BOOL SLIsDefaultAppearance(id appearance)
+{
+    SEL sel = sel_registerName("_isDefaultAppearance");
+    return !appearance || ![appearance respondsToSelector:sel] || ((BOOL (*)(id, SEL))objc_msgSend)(appearance, sel);
+}
+
+static void *sl_coreUIRenderer(id self, SEL _cmd)
+{
+    void *renderer = orig_coreUIRenderer(self, _cmd);
+    if (renderer && !SLIsDefaultAppearance(self)) {
+        OSSpinLockLock(&gCustomRenderersLock);
+        CFSetAddValue(gCustomRenderers, renderer);
+        OSSpinLockUnlock(&gCustomRenderersLock);
+    }
+    return renderer;
+}
+
+static BOOL SLIsCustomRenderer(CFTypeRef renderer)
+{
+    if (!renderer || !gCustomRenderers) return NO;
+    OSSpinLockLock(&gCustomRenderersLock);
+    BOOL custom = CFSetContainsValue(gCustomRenderers, renderer);
+    OSSpinLockUnlock(&gCustomRenderersLock);
+    return custom;
+}
+
+// A window frame whose window has a non-default appearance of its own.
+static BOOL SLFrameHasCustomAppearance(id frame)
+{
+    NSWindow *window = [frame window];
+    return [window respondsToSelector:@selector(appearance)] && !SLIsDefaultAppearance([window appearance]);
+}
+
+static void SLHookAppearance(void)
+{
+    Class appearance = NSClassFromString(@"NSAppearance");
+    Method m = appearance ? class_getInstanceMethod(appearance, sel_registerName("_coreUIRenderer")) : NULL;
+    if (!m || strncmp(method_getTypeEncoding(m), "^", 1) != 0 ||
+        !class_getInstanceMethod(appearance, sel_registerName("_isDefaultAppearance"))) return;
+    gCustomRenderers = CFSetCreateMutable(NULL, 0, NULL);
+    orig_coreUIRenderer = (void *)method_setImplementation(m, (IMP)sl_coreUIRenderer);
+}
+
 // ---- button positions (NSThemeFrame) ---------------------------------------------------
 
 static double (*orig_spacing)(id, SEL);
@@ -304,19 +363,19 @@ static double (*orig_minYOffset)(id, SEL);
 static double sl_spacing(id self, SEL _cmd)
 {
     double v = orig_spacing(self, _cmd);
-    return v == 6 ? 7 : v;
+    return v == 6 && !SLFrameHasCustomAppearance(self) ? 7 : v;
 }
 
 static double sl_minXInset(id self, SEL _cmd)
 {
     double v = orig_minXInset(self, _cmd);
-    return v == 7 ? 8 : v;
+    return v == 7 && !SLFrameHasCustomAppearance(self) ? 8 : v;
 }
 
 static double sl_minYOffset(id self, SEL _cmd)
 {
     double v = orig_minYOffset(self, _cmd);
-    return v == -2 ? -1 : v;
+    return v == -2 && !SLFrameHasCustomAppearance(self) ? -1 : v;
 }
 
 static void SLHookLayout(void)
@@ -364,7 +423,7 @@ static id sl_titleColor(id self, SEL _cmd)
 {
     id color = orig_titleColor(self, _cmd);
     // Only the standard title colour is replaced (not, say, a dark window's).
-    return SLIsStandardTitleColor(color) ? SLTitleColor(self) : color;
+    return SLIsStandardTitleColor(color) && !SLFrameHasCustomAppearance(self) ? SLTitleColor(self) : color;
 }
 
 static id sl_titleString(id self, SEL _cmd)
@@ -378,7 +437,7 @@ static id sl_titleString(id self, SEL _cmd)
         [shadow setShadowOffset:NSMakeSize(0, -1)];
         [shadow setShadowBlurRadius:0];
     }
-    if (!SLIsStandardTitleColor(orig_titleColor(self, sel_registerName("_currentTitleColor")))) return string;
+    if (!SLIsStandardTitleColor(orig_titleColor(self, sel_registerName("_currentTitleColor"))) || SLFrameHasCustomAppearance(self)) return string;
     NSMutableAttributedString *copy = [[string mutableCopy] autorelease];
     NSRange all = NSMakeRange(0, [copy length]);
     [copy addAttribute:NSForegroundColorAttributeName value:SLTitleColor(self) range:all];
@@ -394,6 +453,7 @@ static void sl_drawTitle(id self, SEL _cmd, NSRect rect, id color)
     NSCell *cell = [self respondsToSelector:@selector(titleCell)] ? [self performSelector:@selector(titleCell)] : nil;
     BOOL restyle = [cell respondsToSelector:@selector(setBackgroundStyle:)] && [cell backgroundStyle] == NSBackgroundStyleRaised
                 && [color isKindOfClass:[NSColor class]] && ![color isEqual:[NSColor whiteColor]];
+    if (SLFrameHasCustomAppearance(self)) { orig_drawTitle(self, _cmd, rect, color); return; }
     CGContextRef ctx = (CGContextRef)[[NSGraphicsContext currentContext] graphicsPort];
     if (ctx) { CGContextSaveGState(ctx); CGContextSetShouldSmoothFonts(ctx, false); }
     if (restyle) [cell setBackgroundStyle:NSBackgroundStyleLight];
@@ -459,7 +519,8 @@ static double SLTexturedTopHeight(NSView *frame, double topHeight)
 
 static id sl_cuiOptions(id self, SEL _cmd, CFStringRef windowType, double topHeight, BOOL separator, double bottomHeight, BOOL scale)
 {
-    if (windowType && CFEqual(windowType, CFSTR("kCUIWindowTypeTextured"))) topHeight = SLTexturedTopHeight(self, topHeight);
+    if (windowType && CFEqual(windowType, CFSTR("kCUIWindowTypeTextured")) && !SLFrameHasCustomAppearance(self))
+        topHeight = SLTexturedTopHeight(self, topHeight);
     return orig_cuiOptions(self, _cmd, windowType, topHeight, separator, bottomHeight, scale);
 }
 
@@ -497,12 +558,12 @@ static NSColor *SLTexturedPattern(NSView *frame, BOOL active)
 
 static id sl_activeTextured(id self, SEL _cmd)
 {
-    return SLTexturedPattern(self, YES) ?: orig_activeTextured(self, _cmd);
+    return (SLFrameHasCustomAppearance(self) ? nil : SLTexturedPattern(self, YES)) ?: orig_activeTextured(self, _cmd);
 }
 
 static id sl_inactiveTextured(id self, SEL _cmd)
 {
-    return SLTexturedPattern(self, NO) ?: orig_inactiveTextured(self, _cmd);
+    return (SLFrameHasCustomAppearance(self) ? nil : SLTexturedPattern(self, NO)) ?: orig_inactiveTextured(self, _cmd);
 }
 
 // A layer-backed window frame normally has CoreUI build it a tree of layers
@@ -550,7 +611,8 @@ static OSStatus sl_CUIDraw(CFTypeRef renderer, CGRect rect, CGContextRef ctx, CF
 {
     NSDictionary *o = (NSDictionary *)options;
     NSString *widget = [o isKindOfClass:[NSDictionary class]] ? o[@"widget"] : nil;
-    if (!ctx || ![widget isKindOfClass:[NSString class]] || [o[@"kCUIMaskOnlyKey"] boolValue] || !SLIsSnowLeopardWindowType(o[@"windowtype"]))
+    if (!ctx || ![widget isKindOfClass:[NSString class]] || [o[@"kCUIMaskOnlyKey"] boolValue] || !SLIsSnowLeopardWindowType(o[@"windowtype"])
+        || SLIsCustomRenderer(renderer))
         return orig_CUIDraw(renderer, rect, ctx, options, result);
 
     if ([widget hasPrefix:@"titlebar"]) {
@@ -589,6 +651,7 @@ static void SLSetUp(void)
         NSLog(@"SnowLeopardWindows: SLWindowArt.bin missing or unreadable; leaving window chrome alone.");
         return;
     }
+    SLHookAppearance();
     hook(cuiDraw, (void *)sl_CUIDraw, (void **)&orig_CUIDraw);
     SLHookLayout();
     SLHookTitle();
