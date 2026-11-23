@@ -98,7 +98,8 @@ static BOOL SLHasCustomAppearance(NSView *view)
 
 static inline BOOL SLIsLegacy(NSScroller *scroller)
 {
-    return gEnabled && [scroller scrollerStyle] == NSScrollerStyleLegacy && !SLHasCustomAppearance(scroller);
+    return gEnabled && [scroller scrollerStyle] == NSScrollerStyleLegacy
+        && (SLRemindersSkinned(scroller) || !SLHasCustomAppearance(scroller));
 }
 
 int SLArrowConfig(void) { return gArrowConfig; }
@@ -254,6 +255,7 @@ static void sl_oldDrawArrow(NSScroller *self, SEL _cmd, NSScrollerArrow arrow, N
 {
     if (!SLIsLegacy(self)) { SL_ORIG(oldDrawArrow)(self, _cmd, arrow, highlightPart); return; }
     SLState st = SLStateForScroller(self);
+    if (SLRemindersSkinned(self)) { SLRemindersPaintArrow(self, &st, arrow, highlightPart); return; }
     SLPaintArrow(&st, arrow, highlightPart);
 }
 
@@ -834,6 +836,7 @@ BOOL SLHook(Class cls, SEL sel, IMP replacement, IMP *original)
 
     // Calendar's Day and Week views.
     SLCalendarInstall();
+    SLRemindersInstall();
 
     [[NSDistributedNotificationCenter defaultCenter] addObserver:self
                                                         selector:@selector(arrowVariantChanged:)

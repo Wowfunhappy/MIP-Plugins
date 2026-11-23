@@ -80,3 +80,9 @@ void SLWebKitInstall(void);
 // ---- SLCalendar.m ----------------------------------------------------------
 
 void SLCalendarInstall(void);       // Calendar's Day and Week views
+
+// ---- SLReminders.m ---------------------------------------------------------
+
+void SLRemindersInstall(void);
+BOOL SLRemindersSkinned(NSScroller *scroller);     // a Reminders scroller, drawn with arrows in its own style
+void SLRemindersPaintArrow(NSScroller *scroller, const SLState *st, NSScrollerArrow arrow, NSInteger highlightPart);
