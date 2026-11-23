@@ -10,18 +10,21 @@
 //  -rectForPart:NSScrollerKnob). It was drawn for Lion's arrowless legacy
 //  scroll bars and has no arrows.
 //
-//  Apple's own skinned scroll bars of the Snow Leopard era (iTunes 10,
-//  iPhoto '11, Aperture 3) kept the system's layout and its arrows, placed as
-//  set in Appearance preferences, and drew the arrow buttons in the skin's own
-//  style. So here: Snow Leopard's layout and behaviour as for any scroll bar;
-//  Reminders paints its track and thumb into that layout itself; and the arrow
-//  buttons are drawn in Reminders' style - its own track behind them, a hairline
-//  between buttons and track, and triangles in the thumb's translucent black.
+//  Here it gets Snow Leopard's layout and behaviour like any scroll bar, and
+//  Reminders paints its track and thumb into that layout itself. The ends -
+//  arrow buttons, and the cap at an end without arrows - are Snow Leopard's,
+//  with Reminders' track fading into Snow Leopard's over a short stretch
+//  before them, so it runs into the rounded end of the Aqua track instead of
+//  stopping at it. In the dark sidebar the same Snow Leopard art, fade
+//  included, is turned gray and darkened into the leather's range, keeping
+//  its shading; its triangles are then darkened further, so the arrows read.
 //
 
 #import "SLScrollBars.h"
 
 static Class gRemindersScroller;
+
+static const CGFloat kSLRemindersFade = 20;     // points of track over which Reminders' fades into Snow Leopard's
 
 BOOL SLRemindersSkinned(NSScroller *scroller)
 {
@@ -34,84 +37,126 @@ static BOOL SLRemindersIsDark(NSScroller *scroller)
     return [scroller respondsToSelector:sel] && ((BOOL (*)(id, SEL))objc_msgSend)(scroller, sel);
 }
 
-// One arrow button: `rect` along the axis, its triangle pointing to the near
-// (decrement) or far end; `separator` is the edge facing the slot or the other
-// button, given as the along-axis coordinate of the hairline.
-static void SLRemindersPaintButton(const SLState *st, NSRect rect, BOOL decrement, BOOL pressed, BOOL dark, CGFloat separator)
+static void SLFillWithBlend(CGContextRef ctx, CGRect rect, CGBlendMode mode, CGFloat gray)
 {
-    // Pressed: the button darkens, as the thumb's black over the track.
-    if (pressed) {
-        [[NSColor colorWithCalibratedWhite:0 alpha:dark ? 0.30 : 0.10] set];
-        NSRectFillUsingOperation(rect, NSCompositeSourceOver);
-    }
+    CGContextSetBlendMode(ctx, mode);
+    CGContextSetGrayFillColor(ctx, gray, 1);
+    CGContextFillRect(ctx, rect);
+}
 
-    // The hairline between this button and what lies towards the slot.
-    [[NSColor colorWithCalibratedWhite:0 alpha:dark ? 0.45 : 0.13] set];
-    if (st->horizontal) NSRectFillUsingOperation(NSMakeRect(separator, NSMinY(rect), 1, NSHeight(rect)), NSCompositeSourceOver);
-    else NSRectFillUsingOperation(NSMakeRect(NSMinX(rect), separator, NSWidth(rect), 1), NSCompositeSourceOver);
+// Paints `paint` (Snow Leopard art) into `rect`; in the dark scroll bar,
+// turned gray and mapped into the leather's range.
+static void SLRemindersPaint(NSScroller *scroller, CGRect rect, void (^paint)(void))
+{
+    if (!SLRemindersIsDark(scroller)) { paint(); return; }
+    CGContextRef ctx = (CGContextRef)[[NSGraphicsContext currentContext] graphicsPort];
+    CGContextSaveGState(ctx);
+    CGContextClipToRect(ctx, rect);
+    CGContextBeginTransparencyLayerWithRect(ctx, rect, NULL);
+    paint();
+    SLFillWithBlend(ctx, rect, kCGBlendModeColor, 0.5);             // gray
+    SLFillWithBlend(ctx, rect, kCGBlendModeMultiply, 0.22);         // into the leather's range:
+    SLFillWithBlend(ctx, rect, kCGBlendModePlusLighter, 0.02);      // buttons of 232 become 56
+    // Back to the art's own shape.
+    CGContextSetBlendMode(ctx, kCGBlendModeDestinationIn);
+    paint();
+    CGContextEndTransparencyLayer(ctx);
+    CGContextRestoreGState(ctx);
+}
 
-    // The triangle: as wide as the thumb (8 points) and 4 deep, centred on the
-    // thumb's line - Reminders' -drawKnob puts the thumb's middle 8 points in
-    // from the scroll bar's edge, or 7 in the dark scroll bar - in the thumb's
-    // black (a little stronger, as it is much smaller); fainter in an inactive
-    // window.
-    CGFloat alpha = dark ? 0.75 : 0.45;
-    if (pressed) alpha = MIN(1, alpha + 0.2);
-    if (!st->arrowsActive) alpha *= 0.55;
-    CGFloat width = st->small ? 6 : 8, depth = st->small ? 3 : 4;
-    CGFloat across = (st->horizontal ? NSMinY(rect) : NSMinX(rect)) + (st->small ? 6 : 8) - (dark ? 1 : 0);
-    CGFloat base = round((st->horizontal ? NSMidX(rect) : NSMidY(rect)) + (decrement ? depth : -depth) / 2);
-    CGFloat tip = base + (decrement ? -depth : depth);
-    NSBezierPath *path = [NSBezierPath bezierPath];
-    if (st->horizontal) {
-        [path moveToPoint:NSMakePoint(base, across - width / 2)];
-        [path lineToPoint:NSMakePoint(base, across + width / 2)];
-        [path lineToPoint:NSMakePoint(tip, across)];
-    } else {
-        [path moveToPoint:NSMakePoint(across - width / 2, base)];
-        [path lineToPoint:NSMakePoint(across + width / 2, base)];
-        [path lineToPoint:NSMakePoint(across, tip)];
+// In the dark scroll bar the triangles are darkened further (to about 6, from
+// about 24, on buttons of about 58), so the dark-on-dark arrows read: each
+// pixel towards black in proportion to how much of it the triangle covers, so
+// the shape and antialiasing are unchanged. The triangles are found in the
+// Snow Leopard art itself, rendered at the context's scale: they are its
+// darkest pixels (gray 69, 12 when pressed, on buttons of 232, or 130-150
+// when pressed; the faded triangles of an inactive window, 138, are left).
+static void SLRemindersDarkenTriangles(const SLState *st, NSScrollerArrow arrow, NSInteger highlightPart, CGRect rect)
+{
+    CGContextRef ctx = (CGContextRef)[[NSGraphicsContext currentContext] graphicsPort];
+    CGSize device = CGContextConvertSizeToDeviceSpace(ctx, CGSizeMake(1, 1));
+    int scale = MAX(1, (int)lround(fabs(device.height)));
+    size_t w = (size_t)ceil(rect.size.width * scale), h = (size_t)ceil(rect.size.height * scale);
+    if (w == 0 || h == 0 || w > 256 || h > 256) return;
+
+    // The art, in gray, laid out as in the view (row 0 at the top).
+    CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+    CGContextRef g = CGBitmapContextCreate(NULL, w, h, 8, w, gray, (CGBitmapInfo)kCGImageAlphaNone);
+    CGColorSpaceRelease(gray);
+    if (!g) return;
+    CGContextSetGrayFillColor(g, 1, 1);
+    CGContextFillRect(g, CGRectMake(0, 0, w, h));
+    if (st->flipped) { CGContextTranslateCTM(g, 0, h); CGContextScaleCTM(g, 1, -1); }
+    CGContextScaleCTM(g, scale, scale);
+    CGContextTranslateCTM(g, -rect.origin.x, -rect.origin.y);
+    [NSGraphicsContext saveGraphicsState];
+    [NSGraphicsContext setCurrentContext:[NSGraphicsContext graphicsContextWithGraphicsPort:g flipped:st->flipped]];
+    SLPaintArrow(st, arrow, highlightPart);
+    [NSGraphicsContext restoreGraphicsState];
+
+    // Triangle coverage, as black over the triangle (premultiplied: alpha only).
+    const uint8_t *v = CGBitmapContextGetData(g);
+    uint8_t *out = calloc(w * h * 4, 1);
+    for (size_t i = 0; i < w * h; i++)
+        out[i * 4 + 3] = (uint8_t)lroundf(fmaxf(0, fminf(1, (130.0f - v[i]) / 61.0f)) * 255);
+    CGContextRelease(g);
+
+    CGColorSpaceRef rgb = CGColorSpaceCreateDeviceRGB();
+    CGContextRef o = CGBitmapContextCreate(out, w, h, 8, w * 4, rgb, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(rgb);
+    CGImageRef image = o ? CGBitmapContextCreateImage(o) : NULL;
+    if (o) CGContextRelease(o);
+    free(out);
+    if (!image) return;
+    CGContextSaveGState(ctx);
+    if (st->flipped) {
+        CGContextTranslateCTM(ctx, 0, CGRectGetMinY(rect) + CGRectGetMaxY(rect));
+        CGContextScaleCTM(ctx, 1, -1);
     }
-    [path closePath];
-    [[NSColor colorWithCalibratedWhite:0 alpha:alpha] set];
-    [path fill];
+    CGContextDrawImage(ctx, rect, image);
+    CGContextRestoreGState(ctx);
+    CGImageRelease(image);
 }
 
 // Stands in for -[NSScroller drawArrow:highlightPart:] (SLPaintArrow): one end
-// of the scroll bar, with whatever buttons it has.
+// of the scroll bar.
 void SLRemindersPaintArrow(NSScroller *scroller, const SLState *st, NSScrollerArrow arrow, NSInteger highlightPart)
 {
     NSRect end = SLDrawingRect(st, arrow == NSScrollerDecrementArrow ? NSScrollerDecrementLine : NSScrollerIncrementLine);
     if (NSIsEmptyRect(end)) return;
-
-    // Reminders' own track under the whole end.
-    [scroller drawKnobSlotInRect:end highlight:NO];
-    if (st->config == 0) return;
-
-    BOOL dark = SLRemindersIsDark(scroller);
+    CGContextRef ctx = (CGContextRef)[[NSGraphicsContext currentContext] graphicsPort];
     BOOL nearEnd = (arrow == NSScrollerDecrementArrow);
-    CGFloat endMin = st->horizontal ? NSMinX(end) : NSMinY(end);
-    CGFloat endMax = st->horizontal ? NSMaxX(end) : NSMaxY(end);
 
-    // The buttons are the arrows' click areas (parts 7 and 8 are DoubleBoth's
-    // second pair); those in this end are drawn here.
-    static const NSScrollerPart parts[4] = { NSScrollerDecrementLine, NSScrollerIncrementLine, 7, 8 };
-    for (int i = 0; i < 4; i++) {
-        NSRect button = SLHitRect(st, parts[i]);
-        if (NSIsEmptyRect(button)) continue;
-        CGFloat bMin = st->horizontal ? NSMinX(button) : NSMinY(button);
-        CGFloat bMax = st->horizontal ? NSMaxX(button) : NSMaxY(button);
-        if (bMin < endMin - 0.5 || bMax > endMax + 0.5) continue;
-
-        BOOL decrement = (parts[i] == NSScrollerDecrementLine || parts[i] == 7);
-        // Which button is lit: the pressed arrow, in the pair it was pressed in.
-        BOOL pressed = st->arrowsActive && highlightPart != -1 &&
-                       highlightPart == (decrement ? NSScrollerDecrementArrow : NSScrollerIncrementArrow);
-        // The hairline goes on the side facing the middle of the scroll bar,
-        // which for the inner button of a pair is also the one between them.
-        CGFloat separator = nearEnd ? bMax - 1 : bMin;
-        SLRemindersPaintButton(st, button, decrement, pressed, dark, separator);
+    // The stretch of track next to this end, where Reminders' track gives way
+    // to Snow Leopard's: Snow Leopard's track drawn over it, from transparent
+    // on the far side to opaque where the end's art begins.
+    NSRect slot = SLDrawingRect(st, NSScrollerKnobSlot);
+    CGFloat slotMin = st->horizontal ? NSMinX(slot) : NSMinY(slot), slotMax = st->horizontal ? NSMaxX(slot) : NSMaxY(slot);
+    CGFloat edge = nearEnd ? (st->horizontal ? NSMaxX(end) : NSMaxY(end)) : (st->horizontal ? NSMinX(end) : NSMinY(end));
+    CGFloat from = nearEnd ? MIN(edge + kSLRemindersFade, slotMax) : MAX(edge - kSLRemindersFade, slotMin);
+    CGFloat lo = MIN(from, edge), hi = MAX(from, edge);
+    if (hi - lo >= 1) {
+        NSRect fade = st->horizontal ? NSMakeRect(lo, NSMinY(slot), hi - lo, NSHeight(slot)) : NSMakeRect(NSMinX(slot), lo, NSWidth(slot), hi - lo);
+        CGContextSaveGState(ctx);
+        CGContextClipToRect(ctx, NSRectToCGRect(fade));
+        CGContextBeginTransparencyLayerWithRect(ctx, NSRectToCGRect(fade), NULL);
+        SLRemindersPaint(scroller, NSRectToCGRect(fade), ^{ SLPaintSlot(st, slot); });
+        CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+        CGGradientRef gradient = CGGradientCreateWithColorComponents(gray, (CGFloat[]){ 0, 0, 0, 1 }, NULL, 2);   // alpha 0 -> 1
+        CGColorSpaceRelease(gray);
+        CGPoint p0 = st->horizontal ? CGPointMake(from, 0) : CGPointMake(0, from);
+        CGPoint p1 = st->horizontal ? CGPointMake(edge, 0) : CGPointMake(0, edge);
+        CGContextSetBlendMode(ctx, kCGBlendModeDestinationIn);
+        CGContextDrawLinearGradient(ctx, gradient, p0, p1, kCGGradientDrawsBeforeStartLocation | kCGGradientDrawsAfterEndLocation);
+        CGGradientRelease(gradient);
+        CGContextEndTransparencyLayer(ctx);
+        CGContextRestoreGState(ctx);
     }
+
+    // Snow Leopard's own end: arrows, or the cap.
+    SLRemindersPaint(scroller, NSRectToCGRect(end), ^{ SLPaintArrow(st, arrow, highlightPart); });
+    if (SLRemindersIsDark(scroller))
+        SLRemindersDarkenTriangles(st, arrow, highlightPart, NSRectToCGRect(end));
 }
 
 void SLRemindersInstall(void)
