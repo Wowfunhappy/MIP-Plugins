@@ -3,9 +3,9 @@
 
 Usage: extract_art.py /path/to/10.6/ArtFile.bin output.bin [tags.plist]
 
-The art is not part of this repository: build.sh runs this against a copy of
-Snow Leopard (for example its install DVD) and puts the result in the built
-bundle.
+The art is not part of this repository: extract.sh runs this against a copy of
+Snow Leopard (for example its install DVD) and puts the result in build/assets,
+which build.sh bundles.
 
 ArtFile.bin (CoreUI, 10.5-10.6):
     header      uint16 fileCount, uint16 maxDepth, uint32 tagCount,

@@ -17,7 +17,7 @@
 //  Snow Leopard's CoreUI took the same options. This plugin hooks CUIDraw and
 //  draws those parts as 10.6 did; everything else goes to CoreUI unchanged.
 //
-//  Buttons: 10.6's own images, extracted at build time from Snow Leopard's
+//  Buttons: 10.6's own images, extracted by extract.sh from Snow Leopard's
 //  ArtFile.bin (see extract_art.py), drawn exactly as stored, at 10.6's
 //  positions: in standard windows 10.6 spaced them 7 points apart (Mavericks 6),
 //  8 points from the left edge (Mavericks 7) and a point lower. Utility panels
@@ -112,7 +112,7 @@ static CFDictionaryRef SLReadArtFile(NSString *resource)
 }
 
 // SLWindowArt.bin: 10.6's 1x images. SLWindowArt@2x.bin: the same images at
-// 2x, rendered at build time from 10.6's recipes (render_hidpi.m).
+// 2x, rendered by extract.sh from 10.6's recipes (render_hidpi.m).
 static BOOL SLLoadArt(void)
 {
     gColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceGenericRGB);
@@ -605,14 +605,14 @@ static void SLHookTextured(void)
 // others behind it, close and add buttons), made to continue the toolbar: the
 // selected tab hangs from it. Mavericks' are Safari 4's images, of the same
 // names, retextured; so +[NSImage imageNamed:] hands out Safari 4's own (from
-// the 10.6 install DVD; see build.sh), which continue 10.6's toolbar exactly.
+// the 10.6 install DVD; see extract.sh), which continue 10.6's toolbar exactly.
 // Finder calls the tabs behind the selected one "InactiveTabFill" (Safari 4:
 // "InactiveTabBG"). The one image 10.6 has no counterpart for, the tab-shaped
 // new-tab button shown with a single tab, keeps its outline in 10.6's tones.
 
 static id (*orig_imageNamed)(id, SEL, NSString *);
-// 10.6's own tab art (Safari 4's, taken from the install DVD at build time;
-// see build.sh), by the same names, where it has the image.
+// 10.6's own tab art (Safari 4's, taken from the install DVD by extract.sh),
+// by the same names, where it has the image.
 static NSString *SLSnowLeopardTabPath(NSString *name)
 {
     NSString *dir = [[[NSBundle bundleForClass:[SLWindows class]] resourcePath] stringByAppendingPathComponent:@"SLTabArt"];
@@ -710,7 +710,7 @@ static NSImage *SLRetonedTabButton(NSImage *image, NSString *referenceName)
 // QuickTime Player's own title bar buttons ("close-active-color" and so on;
 // it draws them itself), as QuickTime Player X drew them on 10.6: the same
 // images by the same names, from 10.6's QuickTime Player (taken from the
-// install DVD at build time; see build.sh). 10.6's fill their 14 x 16 canvas
+// install DVD by extract.sh). 10.6's fill their 14 x 16 canvas
 // with a 14-point button; Mavericks' are 12 points.
 static NSString *SLSnowLeopardQuickTimePath(NSString *name)
 {

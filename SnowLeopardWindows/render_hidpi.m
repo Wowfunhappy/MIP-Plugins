@@ -19,7 +19,7 @@
 //   - ScalableUserInterface refuses to render without the window server's
 //     shared artwork cache, which Mavericks no longer has: CGSSharedArtworkCache()
 //     returns NULL and the cache functions do nothing. render_hidpi_cache.c
-//     (inserted with DYLD_INSERT_LIBRARIES by build.sh) returns a dummy
+//     (inserted with DYLD_INSERT_LIBRARIES by extract.sh) returns a dummy
 //     pointer instead, which is only ever passed back to those no-op functions.
 //   - Mavericks' ScalableUserInterface measures a recipe's subnodes as empty.
 //     A subnode only overrides some of its parent's properties, so each image
@@ -147,7 +147,7 @@ int main(int argc, char **argv)
         if (!QSIOpenBundle || !QSICreateElement || !QSIElementGetDimension || !QSIElementGetImage || !QSIReleaseElement)
             Fail(@"ScalableUserInterface.framework not found (this needs OS X 10.9)");
         void *(*artworkCache)(void) = dlsym(RTLD_DEFAULT, "CGSSharedArtworkCache");
-        if (!artworkCache || !artworkCache()) Fail(@"run with DYLD_INSERT_LIBRARIES=render_hidpi_cache.dylib (see build.sh)");
+        if (!artworkCache || !artworkCache()) Fail(@"run with DYLD_INSERT_LIBRARIES=render_hidpi_cache.dylib (see extract.sh)");
 
         NSFileManager *fm = [NSFileManager defaultManager];
         NSDictionary *recipe = [NSPropertyListSerialization propertyListWithData:
