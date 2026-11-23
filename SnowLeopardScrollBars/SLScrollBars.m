@@ -337,7 +337,9 @@ static void sl_mouseDown(NSScroller *self, SEL _cmd, NSEvent *event)
    The scroller waits gButtonDelay (0.5 s) before it starts repeating; that
    wait is shortened by the time the press was already held, so repeating
    starts when it would have without the hold. */
-static const NSTimeInterval kSLArrowHoldDelay = 0.25;
+// As long as an arrow's own wait before repeating (gButtonDelay, 0.5 s), so a
+// short pause before dragging still resizes, and repeating still starts on time.
+static const NSTimeInterval kSLArrowHoldDelay = 0.5;
 static NSTimeInterval gHeldPressDuration;      // how long a press handed to a scroller had been held
 static NSTimeInterval gHeldPressHandedOver;    // when (system uptime)
 
