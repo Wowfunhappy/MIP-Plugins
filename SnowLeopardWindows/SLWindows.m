@@ -714,11 +714,14 @@ static NSImage *SLRetonedTabButton(NSImage *image, NSString *referenceName)
 // QuickTime Player X's from 10.6, the same images by the same names (taken
 // from the install DVD by extract.sh): 10.6's fill their 14 x 16 canvas with a
 // 14-point button, Mavericks' are 12 points. Apps 10.6 didn't have get
-// QuickTime Player X's too: FaceTime and Reminders use the same names;
-// iBooks has its own, <Aqua|Graphite><state><button> in its library window
+// 10.6's buttons too: QuickTime Player X's in dark title bars (its art is
+// made for one: darker rims, deeper colours) - FaceTime and Reminders use the
+// same names - and 10.6's standard ones in light title bars: iBooks has its
+// own names, <Aqua|Graphite><state><button> in its library window
 // (IMPlatformCore) and ib_tb_Aqua<state><button> in its reader
 // (BKPlatformCore), which has its three inactive buttons as one image too,
-// ib_tb_traffic_lights-inactive-N, in each of its themes.
+// ib_tb_traffic_lights-inactive-N, in each of its themes (its night theme's
+// title bar is dark).
 static NSString *SLQuickTimeArtPath(NSString *name)
 {
     if ([name rangeOfString:@"/"].location != NSNotFound) return nil;
@@ -740,48 +743,122 @@ static NSString *SLAppIdentifier(void)
     return app;
 }
 
-// iBooks' three inactive buttons, as QuickTime Player X's inactive buttons
-// laid out as iBooks lays out its active ones: 20 points apart. QuickTime
-// Player X's "inactive-disabled" buttons are made for its dark title bar, for
-// iBooks' night theme; on light title bars its silver "activenokey" ones look
-// as 10.6's inactive buttons do.
-static NSImage *SLiBooksInactiveButtons(BOOL dark)
+// 10.6's standard title bar button (as drawn in windows by sl_CUIDraw), as an
+// image with its 1x and 2x art: widget "titlebarclose", "titlebarcollapse" or
+// "titlebarzoom"; colors "aqua" or "graphite"; state as in SLWindowArt.bin.
+static NSImage *SLStandardButton(NSString *widget, NSString *colors, NSString *state)
 {
-    NSString *state = dark ? @"inactive-disabled" : @"activenokey";
-    NSImage *close = SLQuickTimeArt([@"close-" stringByAppendingFormat:@"%@-color", state]);
-    NSImage *minimize = SLQuickTimeArt([@"minimize-" stringByAppendingFormat:@"%@-color", state]);
-    NSImage *zoom = SLQuickTimeArt([@"zoom-" stringByAppendingFormat:@"%@-color", state]);
-    if (!close || !minimize || !zoom) return nil;
-    NSSize button = [close size];
-    NSImage *image = [[[NSImage alloc] initWithSize:NSMakeSize(40 + button.width, button.height)] autorelease];
-    [image lockFocus];
-    [close drawAtPoint:NSZeroPoint fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1];
-    [minimize drawAtPoint:NSMakePoint(20, 0) fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1];
-    [zoom drawAtPoint:NSMakePoint(40, 0) fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1];
-    [image unlockFocus];
+    NSString *name = [NSString stringWithFormat:@"regularwin/%@/%@/%@", widget, colors, state];
+    CGImageRef image1x = SLArtImage(name), image2x = (CGImageRef)CFDictionaryGetValue(gArt2x, (CFStringRef)name);
+    if (!image1x) return nil;
+    NSSize size = NSMakeSize(CGImageGetWidth(image1x), CGImageGetHeight(image1x));
+    NSImage *image = [[[NSImage alloc] initWithSize:size] autorelease];
+    NSBitmapImageRep *rep = [[[NSBitmapImageRep alloc] initWithCGImage:image1x] autorelease];
+    [rep setSize:size];
+    [image addRepresentation:rep];
+    if (image2x) {
+        rep = [[[NSBitmapImageRep alloc] initWithCGImage:image2x] autorelease];
+        [rep setSize:size];
+        [image addRepresentation:rep];
+    }
     return image;
 }
 
-static NSImage *SLAppButtonImage(NSString *name)
+// Images drawn side by side, `spacing` points apart, at 1x and 2x.
+static NSImage *SLSideBySide(NSArray *images, CGFloat spacing)
+{
+    NSSize button = [(NSImage *)images[0] size];
+    NSSize size = NSMakeSize(spacing * ([images count] - 1) + button.width, button.height);
+    NSImage *result = [[[NSImage alloc] initWithSize:size] autorelease];
+    for (int scale = 1; scale <= 2; scale++) {
+        NSInteger w = (NSInteger)(scale * size.width), h = (NSInteger)(scale * size.height);
+        NSBitmapImageRep *bitmap = [[[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:w pixelsHigh:h bitsPerSample:8
+            samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:w * 4 bitsPerPixel:32] autorelease];
+        [bitmap setSize:size];
+        [NSGraphicsContext saveGraphicsState];
+        [NSGraphicsContext setCurrentContext:[NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap]];
+        for (NSUInteger i = 0; i < [images count]; i++) {
+            NSImage *image = images[i];
+            // The representation for this scale, drawn at the image's size.
+            NSImageRep *best = nil;
+            for (NSImageRep *rep in [image representations]) if ([rep pixelsWide] == scale * [image size].width) best = rep;
+            [(NSImageRep *)(best ?: [[image representations] lastObject]) drawInRect:NSMakeRect(i * spacing, 0, [image size].width, [image size].height)];
+        }
+        [NSGraphicsContext restoreGraphicsState];
+        [result addRepresentation:bitmap];
+    }
+    return result;
+}
+
+// QuickTime Player X's buttons are 1x only, and differ from 10.6's standard
+// ones (which have 2x renders): darker rims, made for a dark title bar. On
+// Retina displays the app's own (Mavericks') buttons are drawn instead of
+// QuickTime Player X's scaled up: the replacement carries QuickTime Player X's
+// 1x image and the original's 2x one, and AppKit picks by the display. The
+// original's 2x image is centred in a canvas of the replacement's size, for
+// iBooks' three-button image, whose canvas differs.
+static NSImage *SLWithOriginalRetina(NSImage *replacement, NSImage *original)
+{
+    if (!replacement || !original) return replacement;
+    NSSize size = [replacement size], originalSize = [original size];
+    NSImage *image = [[[NSImage alloc] initWithSize:size] autorelease];
+    for (NSImageRep *rep in [replacement representations])
+        if ([rep pixelsWide] <= size.width) [image addRepresentation:rep];
+    for (NSImageRep *rep in [original representations]) {
+        if ([rep pixelsWide] < 2 * originalSize.width) continue;
+        NSInteger w = (NSInteger)(2 * size.width), h = (NSInteger)(2 * size.height);
+        NSBitmapImageRep *bitmap = [[[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:w pixelsHigh:h bitsPerSample:8
+            samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:w * 4 bitsPerPixel:32] autorelease];
+        [bitmap setSize:size];
+        [NSGraphicsContext saveGraphicsState];
+        [NSGraphicsContext setCurrentContext:[NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap]];
+        [rep drawInRect:NSMakeRect(round((size.width - originalSize.width) / 2), round((size.height - originalSize.height) / 2),
+                                   originalSize.width, originalSize.height)];
+        [NSGraphicsContext restoreGraphicsState];
+        [image addRepresentation:bitmap];
+        break;
+    }
+    return image;
+}
+
+// QuickTime Player X's art for an app's own image name, with the app's own
+// (Mavericks') 2x image for Retina displays.
+static NSImage *SLQuickTimeButton(NSString *name, NSImage *original)
+{
+    return SLWithOriginalRetina(SLQuickTimeArt(name), original);
+}
+
+// An app's own title bar button image, by name, in 10.6's style; nil if the
+// app or name isn't one of these.
+static NSImage *SLAppButtonImage(NSString *name, NSImage *original)
 {
     NSString *app = SLAppIdentifier();
+    // Dark title bars: QuickTime Player X's buttons, by QuickTime Player's names.
     if ([app isEqualToString:@"com.apple.QuickTimePlayerX"] || [app isEqualToString:@"com.apple.FaceTime"] || [app isEqualToString:@"com.apple.reminders"])
-        return SLQuickTimeArt(name);
+        return SLQuickTimeButton(name, original);
+    // iBooks' light title bars: 10.6's standard buttons.
     if ([app isEqualToString:@"com.apple.iBooksX"]) {
-        if ([name hasPrefix:@"ib_tb_"] && [name hasSuffix:@"traffic_lights-inactive-N"])
-            return SLiBooksInactiveButtons([name hasPrefix:@"ib_tb_night_"]);
+        if ([name hasPrefix:@"ib_tb_"] && [name hasSuffix:@"traffic_lights-inactive-N"]) {
+            if ([name hasPrefix:@"ib_tb_night_"]) {     // its night theme's dark title bar
+                NSArray *images = @[ SLQuickTimeArt(@"close-inactive-disabled-color"), SLQuickTimeArt(@"minimize-inactive-disabled-color"),
+                                     SLQuickTimeArt(@"zoom-inactive-disabled-color") ];
+                return SLWithOriginalRetina(SLSideBySide(images, 20), original);
+            }
+            return SLSideBySide(@[ SLStandardButton(@"titlebarclose", @"aqua", @"inactive"), SLStandardButton(@"titlebarcollapse", @"aqua", @"inactive"),
+                                   SLStandardButton(@"titlebarzoom", @"aqua", @"inactive") ], 20);
+        }
         NSString *rest = [name hasPrefix:@"ib_tb_"] ? [name substringFromIndex:6] : name;
         static NSDictionary *tints, *states, *buttons;
         if (!tints) {
-            tints = [@{ @"Aqua": @"color", @"Graphite": @"graphite" } retain];
-            states = [@{ @"Normal": @"active", @"Hover": @"rollover", @"Pressed": @"pd", @"Inactive": @"activenokey" } retain];   // light title bar
-            buttons = [@{ @"Close": @"close", @"Minimize": @"minimize", @"Zoom": @"zoom" } retain];
+            tints = [@{ @"Aqua": @"aqua", @"Graphite": @"graphite" } retain];
+            states = [@{ @"Normal": @"active", @"Hover": @"rollover", @"Pressed": @"pressed", @"Inactive": @"inactive" } retain];
+            buttons = [@{ @"Close": @"titlebarclose", @"Minimize": @"titlebarcollapse", @"Zoom": @"titlebarzoom" } retain];
         }
         for (NSString *tint in tints)
             for (NSString *state in states)
                 for (NSString *button in buttons)
                     if ([rest isEqualToString:[NSString stringWithFormat:@"%@%@%@", tint, state, button]])
-                        return SLQuickTimeArt([NSString stringWithFormat:@"%@-%@-%@", buttons[button], states[state], tints[tint]]);
+                        return SLStandardButton(buttons[button], tints[tint], states[state]);
     }
     return nil;
 }
@@ -802,7 +879,7 @@ static id SLReplacementImage(NSImage *image, NSString *name)
             return SLRetonedTabButton(image, [prefix stringByAppendingString:@"AddTabButtonRolloverBG Pressed"]);
         return nil;
     }
-    return SLAppButtonImage(name);
+    return SLAppButtonImage(name, image);
 }
 
 static id SLReplaced(NSImage *image, NSString *name)
