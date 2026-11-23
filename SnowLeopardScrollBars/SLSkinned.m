@@ -8,42 +8,38 @@
 //  which have no arrows, and say so by overriding +isCompatibleWithOverlayScrollers
 //  (Lion's API). Snow Leopard's layout doesn't suit such a skin, so these are
 //  left exactly as the app draws them (pre-Lion skinned scrollers, which don't
-//  override that, get 10.6's treatment as they did on 10.6) - except:
+//  override that, get 10.6's treatment as they did on 10.6; Safari's sidebar,
+//  SidebarScroller, is one left alone) - except Reminders'
+//  (RemindersLegacyScroller: a paper track, or leather in its sidebar, with a
+//  slim black pill). Reminders themes itself (an NSAppearance of its own,
+//  RemindersLeather.car), which would also leave it alone (SLScrollBars.m).
 //
-//    Reminders (RemindersLegacyScroller: a paper track, or leather in its
-//    sidebar, with a slim black pill). Reminders themes itself (an
-//    NSAppearance of its own, RemindersLeather.car), which would also leave
-//    it alone (SLScrollBars.m).
-//    Safari's sidebar (SidebarScroller: a translucent track and a light pill).
+//  It gets Snow Leopard's layout and behaviour like any scroll bar, and
+//  Reminders paints its track and thumb into that layout itself. The ends -
+//  arrow buttons, and the cap at an end without arrows - are Snow Leopard's,
+//  with Reminders' track fading into Snow Leopard's over a short stretch
+//  before them, so it runs into the rounded end of the Aqua track instead of
+//  stopping at it. The thumb is Reminders' pill, pulled in 3 points from each
+//  end of its travel so it rests inside the rounded ends of the track, as
+//  10.6's own thumb does (SLSkinnedDrawKnob).
 //
-//  These get Snow Leopard's layout and behaviour like any scroll bar, and the
-//  app paints its track and thumb into that layout itself. The ends - arrow buttons, and
-//  the cap at an end without arrows - are Snow Leopard's, with the app's track
-//  fading into Snow Leopard's over a short stretch before them, so it runs
-//  into the rounded end of the Aqua track instead of stopping at it. Their
-//  tracks may be translucent, so they are not opaque. Per skin:
-//
-//    Reminders' paper: the Snow Leopard art as it is.
-//    Reminders' leather: the art, fade included, turned gray and darkened into
-//      the leather's range, keeping its shading; its triangles then darkened
+//    On paper: the Snow Leopard art as it is.
+//    On leather: the art, fade included, turned gray and darkened into the
+//      leather's range, keeping its shading; its triangles then darkened
 //      further, so the arrows read.
-//    Safari's sidebar: the art turned gray and mapped into the sidebar's grays
-//      (buttons of 232 become about 152, just under its 160 thumb; triangles
-//      of 69 about 70), and Safari's thumb.
 //
 
 #import "SLScrollBars.h"
 #import <libkern/OSAtomic.h>
 
-static Class gRemindersScroller, gSafariSidebarScroller;
+static Class gRemindersScroller;
 
 static const CGFloat kSLSkinFade = 20;      // points of track over which the app's fades into Snow Leopard's
 
-typedef enum { kSLSkinNone, kSLSkinRemindersPaper, kSLSkinRemindersLeather, kSLSkinSafariSidebar } SLSkin;
+typedef enum { kSLSkinNone, kSLSkinRemindersPaper, kSLSkinRemindersLeather } SLSkin;
 
 static SLSkin SLSkinOf(NSScroller *scroller)
 {
-    if (gSafariSidebarScroller && [scroller isKindOfClass:gSafariSidebarScroller]) return kSLSkinSafariSidebar;
     if (gRemindersScroller && [scroller isKindOfClass:gRemindersScroller]) {
         SEL sel = @selector(isDark);
         BOOL dark = [scroller respondsToSelector:sel] && ((BOOL (*)(id, SEL))objc_msgSend)(scroller, sel);
@@ -100,7 +96,6 @@ static void SLSkinPaint(NSScroller *scroller, CGRect rect, void (^paint)(void))
     CGFloat scale, offset;
     switch (SLSkinOf(scroller)) {
         case kSLSkinRemindersLeather: scale = 0.22; offset = 0.02; break;      // buttons of 232 become 56
-        case kSLSkinSafariSidebar:    scale = 0.50; offset = 0.14; break;      // 232 -> 152, 69 -> 70
         default: paint(); return;
     }
     CGContextRef ctx = (CGContextRef)[[NSGraphicsContext currentContext] graphicsPort];
@@ -172,6 +167,30 @@ static void SLRemindersDarkenTriangles(const SLState *st, NSScrollerArrow arrow,
     CGImageRelease(image);
 }
 
+// Stands in for Reminders' -drawKnob: its pill (its own images, normal or
+// rollover, centred as it centres them), but pulled in from the ends of the
+// knob's travel. 10.6's thumb is as wide as the track and its round end fills
+// the rounded end of the track at each end of its travel, covering the
+// track's rim there; Reminders' narrow pill, drawn over the same length, put
+// its tip on that rim.
+void SLSkinnedDrawKnob(NSScroller *scroller, const SLState *st)
+{
+    NSRect rect = SLDrawingRect(st, NSScrollerKnob);
+    if (NSIsEmptyRect(rect)) return;
+    id imp = [scroller respondsToSelector:@selector(scrollerImp)] ? [scroller performSelector:@selector(scrollerImp)] : nil;
+    BOOL rollover = [imp respondsToSelector:@selector(shouldDrawRolloverState)] && ((BOOL (*)(id, SEL))objc_msgSend)(imp, @selector(shouldDrawRolloverState));
+    NSImage *top = [scroller performSelector:rollover ? @selector(knobTopRollover) : @selector(knobTop)];
+    NSImage *mid = [scroller performSelector:rollover ? @selector(knobMidRollover) : @selector(knobMid)];
+    NSImage *bot = [scroller performSelector:rollover ? @selector(knobBotRollover) : @selector(knobBot)];
+    if (!top || !mid || !bot) return;
+    CGFloat width = [mid size].width;
+    // As -drawKnob: centred, then a point right in the light scroll bar.
+    rect.origin.x += floor((rect.size.width - width) * 0.5) + (SLSkinOf(scroller) == kSLSkinRemindersLeather ? 0 : 1);
+    rect.size.width = width;
+    rect = NSInsetRect(rect, 0, 3);       // its tip rests inside the rounded end, clear of the rim
+    NSDrawThreePartImage(rect, top, mid, bot, YES, NSCompositeSourceOver, 1, NO);
+}
+
 // Stands in for -[NSScroller drawArrow:highlightPart:] (SLPaintArrow): one end
 // of the scroll bar.
 void SLSkinnedPaintArrow(NSScroller *scroller, const SLState *st, NSScrollerArrow arrow, NSInteger highlightPart)
@@ -219,6 +238,4 @@ void SLSkinnedInstall(void)
     Class cls;
     if ([app isEqualToString:@"com.apple.reminders"] && (cls = NSClassFromString(@"RemindersLegacyScroller")) && [cls isSubclassOfClass:[NSScroller class]])
         gRemindersScroller = cls;
-    if ([app isEqualToString:@"com.apple.Safari"] && (cls = NSClassFromString(@"SidebarScroller")) && [cls isSubclassOfClass:[NSScroller class]])
-        gSafariSidebarScroller = cls;
 }

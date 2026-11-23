@@ -234,7 +234,8 @@ static void sl_drawRect(NSScroller *self, SEL _cmd, NSRect dirty)
                 [self drawArrow:NSScrollerIncrementArrow highlightPart:SLHighlightPartForEnd(&st, NO)];
                 break;
             default:
-                [self drawKnob];
+                if (SLSkinHandled(self)) SLSkinnedDrawKnob(self, &st);
+                else [self drawKnob];
                 break;
         }
     }

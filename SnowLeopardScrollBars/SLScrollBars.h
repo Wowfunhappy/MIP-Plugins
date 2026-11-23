@@ -85,5 +85,6 @@ void SLCalendarInstall(void);       // Calendar's Day and Week views
 
 void SLSkinnedInstall(void);
 BOOL SLLionSkin(NSScroller *scroller);             // an app's own skin, made for Lion's arrowless scroll bars
-BOOL SLSkinHandled(NSScroller *scroller);          // ...one this plugin gives 10.6's ends (Reminders, Safari's sidebar)
+BOOL SLSkinHandled(NSScroller *scroller);          // ...one this plugin gives 10.6's ends (Reminders')
 void SLSkinnedPaintArrow(NSScroller *scroller, const SLState *st, NSScrollerArrow arrow, NSInteger highlightPart);
+void SLSkinnedDrawKnob(NSScroller *scroller, const SLState *st);
