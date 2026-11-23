@@ -376,7 +376,8 @@ static void sl_mouseDown(NSScroller *self, SEL _cmd, NSEvent *event)
    While AppKit waits, the arrow is shown pressed, as it would be on 10.6
    from the moment the button goes down: otherwise a quick click only
    reaches the scroller once the button is already up, and its highlight
-   comes and goes in the same pass, never seen.
+   comes and goes in the same pass, never seen. (A WebKit2 page's arrow is
+   drawn pressed over the page from this process: SLShowWebArrowPressed.)
 
    The resize cursor goes too: AppKit shows it as an override cursor
    (+[NSCursor _setOverrideCursor:], from -[NSWindow _edgeResizingCursorUpdate:
@@ -438,7 +439,16 @@ static inline BOOL SLIsArrowPart(NSScrollerPart part)
 // SLWebKit.m): the vertical one runs down the view's right edge, 15 points
 // wide, stopping short of the bottom-right corner when there is a horizontal
 // one too, with the arrows where the arrow setting puts them.
-static BOOL SLPointIsOnWebKitScrollArrow(NSView *view, NSPoint pointInWindow)
+// If so, *web gets what's needed to show that arrow pressed: the view, the
+// scroll bar's state with the arrow pressed, and its frame in the view.
+typedef struct {
+    NSView *view;
+    SLState st;
+    NSRect frame;               // the scroll bar, in the view
+    NSScrollerPart part;        // the arrow pressed
+} SLWebArrowPress;
+
+static BOOL SLPointIsOnWebKitScrollArrow(NSView *view, NSPoint pointInWindow, SLWebArrowPress *web)
 {
     static BOOL (*hasVertical)(const void *), (*hasHorizontal)(const void *);
     static dispatch_once_t once;
@@ -473,14 +483,91 @@ static BOOL SLPointIsOnWebKitScrollArrow(NSView *view, NSPoint pointInWindow)
     st.webKitMetrics = YES;
     st.value = 0.5;             // (the knob is never on an arrow; keep it in the middle)
     st.pressedArrow = -1;
-    return SLIsArrowPart(SLHitTest(&st, NSMakePoint(p.x - (NSMaxX(b) - width), fromTop)));
+    NSScrollerPart part = SLHitTest(&st, NSMakePoint(p.x - (NSMaxX(b) - width), fromTop));
+    if (!SLIsArrowPart(part)) return NO;
+
+    // Pressed, as the page would draw it (SLStateForImp in SLWebKit.m).
+    NSWindow *window = [view window];
+    st.active = st.arrowsActive = [window isKeyWindow] || [window isMainWindow];
+    st.tint = st.active ? [NSColor currentControlTint] : NSClearControlTint;
+    st.pressedArrow = (part == NSScrollerDecrementLine) ? NSScrollerDecrementArrow : NSScrollerIncrementArrow;
+    st.pressedInMaxEnd = fromTop > st.bounds.size.height * 0.5;
+    web->view = view;
+    web->st = st;
+    web->part = part;
+    web->frame = NSMakeRect(NSMaxX(b) - width, [view isFlipped] ? NSMinY(b) : NSMaxY(b) - st.bounds.size.height,
+                            width, st.bounds.size.height);
+    return YES;
+}
+
+// A WebKit2 page's arrow, shown pressed in this process while AppKit waits:
+// the page draws its scroll bars in its own process, and only learns of the
+// press once the wait is over. A borderless window over the arrow, drawn with
+// the same art and clipped to the pressed button (so it never covers the
+// thumb).
+@interface SLWebArrowPressView : NSView {
+@public
+    SLWebArrowPress press;
+}
+@end
+@implementation SLWebArrowPressView
+- (BOOL)isFlipped { return YES; }
+- (void)drawRect:(NSRect)dirty
+{
+    SLState *st = &press.st;
+    NSRect hit = SLHitRect(st, press.part);
+    [NSBezierPath clipRect:[self bounds]];
+    // This view covers the pressed button's rectangle; draw the scroll bar's
+    // arrows (only) as if it were the whole scroll bar.
+    NSAffineTransform *t = [NSAffineTransform transform];
+    [t translateXBy:-hit.origin.x yBy:-hit.origin.y];
+    [t concat];
+    SLPaintArrow(st, NSScrollerDecrementArrow, SLHighlightPartForEnd(st, YES));
+    SLPaintArrow(st, NSScrollerIncrementArrow, SLHighlightPartForEnd(st, NO));
+}
+@end
+
+static NSWindow *SLShowWebArrowPressed(const SLWebArrowPress *press)
+{
+    NSView *view = press->view;
+    NSWindow *parent = [view window];
+    NSRect hit = SLHitRect(&press->st, press->part);       // in the scroll bar (flipped)
+    if (NSIsEmptyRect(hit)) return nil;
+    NSRect frame = press->frame;
+    NSRect inView = [view isFlipped]
+        ? NSMakeRect(NSMinX(frame) + hit.origin.x, NSMinY(frame) + hit.origin.y, hit.size.width, hit.size.height)
+        : NSMakeRect(NSMinX(frame) + hit.origin.x, NSMaxY(frame) - NSMaxY(hit), hit.size.width, hit.size.height);
+    NSRect onScreen = [parent convertRectToScreen:[view convertRect:inView toView:nil]];
+
+    NSWindow *overlay = [[NSWindow alloc] initWithContentRect:onScreen styleMask:NSBorderlessWindowMask
+                                                      backing:NSBackingStoreBuffered defer:NO];
+    [overlay setReleasedWhenClosed:NO];
+    [overlay setOpaque:NO];
+    [overlay setBackgroundColor:[NSColor clearColor]];
+    [overlay setHasShadow:NO];
+    [overlay setIgnoresMouseEvents:YES];
+    SLWebArrowPressView *content = [[[SLWebArrowPressView alloc] initWithFrame:NSMakeRect(0, 0, onScreen.size.width, onScreen.size.height)] autorelease];
+    content->press = *press;
+    [overlay setContentView:content];
+    [parent addChildWindow:overlay ordered:NSWindowAbove];
+    [overlay display];
+    return overlay;
+}
+
+static void SLHideWebArrowPressed(NSWindow *overlay)
+{
+    if (!overlay) return;
+    [[overlay parentWindow] removeChildWindow:overlay];
+    [overlay orderOut:nil];
+    [overlay release];
 }
 
 // Is the mouse-down on a scroll arrow? If it is an NSScroller's, *scroller is
-// set to it (a WebKit2 page's is drawn in another process).
-static BOOL SLEventIsOnScrollArrow(NSEvent *event, NSScroller **scroller)
+// set to it; if a WebKit2 page's, *web is filled in.
+static BOOL SLEventIsOnScrollArrow(NSEvent *event, NSScroller **scroller, SLWebArrowPress *web)
 {
     *scroller = nil;
+    memset(web, 0, sizeof(*web));
     NSWindow *window = [event window];
     NSView *frame = [[window contentView] superview];
     if (!frame) return NO;
@@ -493,13 +580,14 @@ static BOOL SLEventIsOnScrollArrow(NSEvent *event, NSScroller **scroller)
         *scroller = (NSScroller *)hit;
         return YES;
     }
-    return SLPointIsOnWebKitScrollArrow(hit, p);
+    return SLPointIsOnWebKitScrollArrow(hit, p, web);
 }
 
 static NSInteger sl_hysteresisCheck(id self, SEL _cmd, NSEvent *event, NSDate *expiration, NSSize distance, NSPoint *location)
 {
     NSScroller *scroller = nil;
-    if ([expiration timeIntervalSinceNow] > 3600 && [event type] == NSLeftMouseDown && SLEventIsOnScrollArrow(event, &scroller)) {
+    SLWebArrowPress web;
+    if ([expiration timeIntervalSinceNow] > 3600 && [event type] == NSLeftMouseDown && SLEventIsOnScrollArrow(event, &scroller, &web)) {
         NSTimeInterval now = [[NSProcessInfo processInfo] systemUptime];
         NSTimeInterval wait = MAX(0, kSLArrowHoldDelay - (now - [event timestamp]));
 
@@ -517,6 +605,7 @@ static NSInteger sl_hysteresisCheck(id self, SEL _cmd, NSEvent *event, NSDate *e
             [scroller displayIfNeeded];
             [CATransaction flush];
         }
+        NSWindow *webOverlay = web.view ? SLShowWebArrowPressed(&web) : nil;
 
         NSInteger result = SL_ORIG(hysteresisCheck)(self, _cmd, event, [NSDate dateWithTimeIntervalSinceNow:wait], distance, location);
 
@@ -529,6 +618,7 @@ static NSInteger sl_hysteresisCheck(id self, SEL _cmd, NSEvent *event, NSDate *e
                                  | (flags2 & (kSFlags2HitPartMask | kSFlags2MaxEndHit));
             [scroller release];
         }
+        SLHideWebArrowPressed(webOverlay);
         if (result == 1) {          // expired: held still, so it goes to the scroller as a press
             gHeldPressHandedOver = [[NSProcessInfo processInfo] systemUptime];
             gHeldPressDuration = gHeldPressHandedOver - [event timestamp];
