@@ -137,6 +137,8 @@ static void (*SL_ORIG(windowChangedKeyState))(id, SEL);
 static BOOL (*SL_ORIG(wantsUpdateLayer))(id, SEL);
 static BOOL (*SL_ORIG(isOpaque))(id, SEL);
 static void (*SL_ORIG(mouseDown))(id, SEL, NSEvent *);
+static NSInteger (*SL_ORIG(hysteresisCheck))(id, SEL, NSEvent *, NSDate *, NSSize, NSPoint *);
+static void (*SL_ORIG(startPeriodicEvents))(id, SEL, NSTimeInterval, NSTimeInterval);
 static CGFloat (*SL_ORIG(impKnobLength))(id, SEL);
 static CGFloat (*SL_ORIG(impKnobEndInset))(id, SEL);
 static void (*SL_ORIG(impSetLayer))(id, SEL, CALayer *);
@@ -310,6 +312,70 @@ static void sl_mouseDown(NSScroller *self, SEL _cmd, NSEvent *event)
         if (along > length * 0.5) SL_SFLAGS2(self) |= kSFlags2MaxEndHit; else SL_SFLAGS2(self) &= ~kSFlags2MaxEndHit;
     }
     SL_ORIG(mouseDown)(self, _cmd, event);
+}
+
+/* Pressing and holding a scroll arrow in a window's resize corner.
+
+   Mavericks lets any window be resized from its corners, and the bottom-right
+   one is where a lone vertical scroller has its down arrow. A mouse-down
+   there goes through -[NSWindow _hitTestWithHysteresisCheck:forEvent:
+   allowWindowDragging:], which waits in +_mouseHysteresisCheck:withExpiration:
+   andDistance:finalMouseLocation: for the mouse to move (a resize) or come up
+   (then the click goes to the view under it, on mouse-up). AppKit passes
+   [NSDate distantFuture], so holding the button still never reaches the
+   scroller and an arrow can't be held down to keep scrolling.
+
+   For a press on a scroll arrow, the wait gets an expiration instead: held
+   still for kSLArrowHoldDelay, the check returns "expired", which AppKit
+   treats like a click, but now with the button still down, so the scroller
+   tracks it (-trackScrollButtons:) and repeats. Moving first still resizes;
+   a quick click still works on mouse-up.
+
+   The scroller waits gButtonDelay (0.5 s) before it starts repeating; that
+   wait is shortened by the time the press was already held, so repeating
+   starts when it would have without the hold. */
+static const NSTimeInterval kSLArrowHoldDelay = 0.25;
+static NSTimeInterval gHeldPressDuration;      // how long a press handed to a scroller had been held
+static NSTimeInterval gHeldPressHandedOver;    // when (system uptime)
+
+static BOOL SLEventIsOnScrollArrow(NSEvent *event)
+{
+    NSWindow *window = [event window];
+    NSView *frame = [[window contentView] superview];
+    if (!frame) return NO;
+    NSPoint p = [event locationInWindow];
+    NSView *hit = [frame respondsToSelector:@selector(_hitTest:ignoringResizeRegion:)]
+                ? ((NSView *(*)(id, SEL, NSPoint, BOOL))objc_msgSend)(frame, @selector(_hitTest:ignoringResizeRegion:), p, YES)
+                : [frame hitTest:p];
+    if (![hit isKindOfClass:[NSScroller class]] || !SLIsLegacy((NSScroller *)hit)) return NO;
+    NSScrollerPart part = [(NSScroller *)hit testPart:p];
+    return part == NSScrollerDecrementLine || part == NSScrollerIncrementLine;
+}
+
+static NSInteger sl_hysteresisCheck(id self, SEL _cmd, NSEvent *event, NSDate *expiration, NSSize distance, NSPoint *location)
+{
+    if ([expiration timeIntervalSinceNow] > 3600 && [event type] == NSLeftMouseDown && SLEventIsOnScrollArrow(event)) {
+        NSTimeInterval now = [[NSProcessInfo processInfo] systemUptime];
+        NSTimeInterval wait = MAX(0, kSLArrowHoldDelay - (now - [event timestamp]));
+        NSInteger result = SL_ORIG(hysteresisCheck)(self, _cmd, event, [NSDate dateWithTimeIntervalSinceNow:wait], distance, location);
+        if (result == 1) {          // expired: held still, so it goes to the scroller as a press
+            gHeldPressHandedOver = [[NSProcessInfo processInfo] systemUptime];
+            gHeldPressDuration = gHeldPressHandedOver - [event timestamp];
+        }
+        return result;
+    }
+    return SL_ORIG(hysteresisCheck)(self, _cmd, event, expiration, distance, location);
+}
+
+static void sl_startPeriodicEvents(id self, SEL _cmd, NSTimeInterval delay, NSTimeInterval period)
+{
+    if (gHeldPressDuration > 0) {
+        // The scroller tracking the press handed over above (within the same event).
+        if ([[NSProcessInfo processInfo] systemUptime] - gHeldPressHandedOver < 0.1)
+            delay = MAX(0, delay - gHeldPressDuration);
+        gHeldPressDuration = 0;
+    }
+    SL_ORIG(startPeriodicEvents)(self, _cmd, delay, period);
 }
 
 /* A layer-backed NSScroller leaves redrawing to its NSScrollerImp's track and
@@ -609,6 +675,16 @@ BOOL SLHook(Class cls, SEL sel, IMP replacement, IMP *original)
             // seen as a change.
             ((void (*)(id, SEL, NSInteger))objc_msgSend)(shared, setter, SL_ORIG(recommendedStyle)(shared, @selector(recommendedScrollerStyle)));
         }
+    }
+
+    // Press and hold on a scroll arrow in the window's resize corner.
+    Class windowMeta = object_getClass([NSWindow class]);
+    SEL hysteresis = NSSelectorFromString(@"_mouseHysteresisCheck:withExpiration:andDistance:finalMouseLocation:");
+    Method check = class_getClassMethod([NSWindow class], hysteresis);
+    if (check && !strcmp(method_getTypeEncoding(check), "q56@0:8@16@24{CGSize=dd}32^{CGPoint=dd}48") &&
+        SLHook(windowMeta, hysteresis, (IMP)sl_hysteresisCheck, (IMP *)&SL_ORIG(hysteresisCheck))) {
+        SLHook(object_getClass([NSEvent class]), @selector(startPeriodicEventsAfterDelay:withPeriod:),
+               (IMP)sl_startPeriodicEvents, (IMP *)&SL_ORIG(startPeriodicEvents));
     }
 
     // Page scrollbars in WebKit (Safari's WebContent process, WebViews).
