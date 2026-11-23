@@ -10,9 +10,10 @@
 //  The resource lookup (ThemeTable.inc) and image construction below mirror
 //  AppKit 1038's ReadThemeInfo.m: _GetThemeImage / _NSReadThemeImageFromRsrc.
 //
-//  Retina: the bundle may carry SLScrollArt@2x.bin, a twin at twice the size
-//  for each pixmap, rendered at build time from Snow Leopard's CoreUI art (see
-//  hidpi/build_hidpi.py). Every drawing primitive below goes through
+//  Retina: the pixmaps are drawn scaled up, as 10.6 did, except the arrow
+//  buttons: SLScrollArt@2x.bin carries a twin at twice the size for each of
+//  those, made at build time with the triangle redrawn sharp (see
+//  hidpi/glyphs.py). Every drawing primitive below goes through
 //  SLDrawImagePart, which draws the twin instead when the context has two or
 //  more device pixels per point. Geometry is unchanged: the twin covers
 //  exactly what the pixmap would.
