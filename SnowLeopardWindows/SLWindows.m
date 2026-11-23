@@ -145,7 +145,9 @@ static NSString *SLButtonImageName(NSDictionary *o)
     if ([state isEqualToString:@"disabled"]) states = @[@"disabled"];
     else if ([state isEqualToString:@"pressed"]) states = @[@"pressed"];
     else if ([state isEqualToString:@"rollover"]) states = @[@"rollover"];
-    else if ([presentation isEqualToString:@"kCUIPresentationStateInactive"]) states = @[@"inactive"];
+    // (AppKit says a window is inactive in kCUIPresentationStateKey; Carbon,
+    // HIToolbox, in "state".)
+    else if ([presentation isEqualToString:@"kCUIPresentationStateInactive"] || [state isEqualToString:@"inactive"]) states = @[@"inactive"];
     else if ([presentation isEqualToString:@"kCUIPresentationStateActiveMain"]) states = @[@"activenokey", @"active"];
     else states = @[@"active", @"key", @"normal"];
 
@@ -298,6 +300,38 @@ static void SLDrawTitleBar(CGRect rect, CGContextRef ctx, NSDictionary *o)
     SLFillGradient(ctx, rect, 1, n, flipped, s, e);
     for (int r = n + 1; r < rows; r++) SLFillRow(ctx, rect, r, flipped, SLSeparatorGray(active));
     CGContextRestoreGState(ctx);
+}
+
+// A standard window's frame. AppKit asks for its title bar (and unified
+// toolbar) alone; a Carbon window (HIToolbox) asks for the whole window at
+// once, saying how tall its title bar and unified toolbar are
+// (kCUIWindowFrameUnifiedTitleBarHeightKey) and its bottom bar
+// (kCUIWindowFrameBottomBarHeightKey). Then the title bar gradient goes over
+// the top that tall, and the bottom bar's (as AppKit's bottom bars get it,
+// with its separator if asked for) over the bottom; the window's body between
+// them is CoreUI's, as in AppKit's windows.
+static void SLDrawRegularFrame(CGRect rect, CGContextRef ctx, NSDictionary *o)
+{
+    BOOL flipped = [o[@"is.flipped"] boolValue];
+    CGFloat height = rect.size.height;
+    CGFloat top = round([o[@"kCUIWindowFrameUnifiedTitleBarHeightKey"] doubleValue]);
+    if (top <= 0 || top >= height) {
+        SLDrawTitleBar(rect, ctx, o);
+        return;
+    }
+    // Rows count from the top: in a flipped context the top is the rectangle's minimum y.
+    CGRect title = rect;
+    title.size.height = top;
+    if (!flipped) title.origin.y = CGRectGetMaxY(rect) - top;
+    SLDrawTitleBar(title, ctx, o);
+
+    CGFloat bottom = round([o[@"kCUIWindowFrameBottomBarHeightKey"] doubleValue]);
+    if (bottom > 0 && top + bottom <= height) {
+        CGRect bar = rect;
+        bar.size.height = bottom;
+        if (flipped) bar.origin.y = CGRectGetMaxY(rect) - bottom;
+        SLDrawBottomBar(bar, ctx, o);
+    }
 }
 
 // ---- windows with their own appearance ---------------------------------------------------
@@ -940,7 +974,7 @@ static OSStatus sl_CUIDraw(CFTypeRef renderer, CGRect rect, CGContextRef ctx, CF
     } else if ([widget isEqualToString:@"kCUIWidgetWindowFrame"]) {
         OSStatus status = orig_CUIDraw(renderer, rect, ctx, options, result);
         if ([o[@"windowtype"] isEqualToString:@"kCUIWindowTypeTextured"]) SLDrawTexturedFrame(rect, ctx, o);
-        else SLDrawTitleBar(rect, ctx, o);
+        else SLDrawRegularFrame(rect, ctx, o);
         return status;
     } else if ([widget isEqualToString:@"kCUIWidgetWindowBottomBar"] && o[@"windowtype"]) {
         OSStatus status = orig_CUIDraw(renderer, rect, ctx, options, result);
