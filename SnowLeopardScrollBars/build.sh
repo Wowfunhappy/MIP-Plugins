@@ -22,7 +22,7 @@ clang -bundle -arch i386 -arch x86_64 -mmacosx-version-min=10.9 \
     -Os -Wall -Wno-deprecated-declarations -fno-objc-arc \
     -framework Cocoa -framework QuartzCore \
     -o "$BUNDLE/Contents/MacOS/$NAME" \
-    SLScrollBars.m SLDraw.m SLWebKit.m SLArt.m
+    SLScrollBars.m SLDraw.m SLWebKit.m SLArt.m SLCalendar.m
 
 echo "Built $BUNDLE"
 

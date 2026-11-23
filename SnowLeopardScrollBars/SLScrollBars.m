@@ -809,6 +809,9 @@ BOOL SLHook(Class cls, SEL sel, IMP replacement, IMP *original)
     // Page scrollbars in WebKit (Safari's WebContent process, WebViews).
     SLWebKitInstall();
 
+    // Calendar's Day and Week views.
+    SLCalendarInstall();
+
     [[NSDistributedNotificationCenter defaultCenter] addObserver:self
                                                         selector:@selector(arrowVariantChanged:)
                                                             name:@"AppleAquaScrollBarVariantChanged"

@@ -76,3 +76,7 @@ BOOL SLHook(Class cls, SEL sel, IMP replacement, IMP *original);
 // ---- SLWebKit.m ------------------------------------------------------------
 
 void SLWebKitInstall(void);
+
+// ---- SLCalendar.m ----------------------------------------------------------
+
+void SLCalendarInstall(void);       // Calendar's Day and Week views
