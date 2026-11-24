@@ -23,17 +23,10 @@ cp Info.plist "$BUNDLE/Contents/Info.plist"
 cp -R "$ASSETS/SLWindowArt.bin" "$ASSETS/SLWindowArt@2x.bin" "$ASSETS/SLTabArt" "$ASSETS/SLQuickTimeArt" \
     "$BUNDLE/Contents/Resources/"
 
-# The bundle's main executable: no AppKit (SLWindowsCore.m), so it can go into
-# Carbon apps that have none. It loads SnowLeopardWindows-AppKit into apps
-# that have AppKit.
-FLAGS="-arch i386 -arch x86_64 -mmacosx-version-min=10.9 -Os -Wall -Wno-deprecated-declarations -fno-objc-arc -fvisibility=hidden"
-clang -bundle $FLAGS -framework Foundation -framework Carbon -framework ApplicationServices \
-    -o "$BUNDLE/Contents/MacOS/$NAME" SLWindowsCore.m SLWindowsDraw.m
-clang -bundle $FLAGS -framework Cocoa \
-    -o "$BUNDLE/Contents/MacOS/$NAME-AppKit" SLWindows.m SLWindowsDraw.m
-if otool -L "$BUNDLE/Contents/MacOS/$NAME" | grep -q AppKit.framework; then
-    echo "$NAME must not link AppKit." >&2
-    exit 1
-fi
+clang -bundle -arch i386 -arch x86_64 -mmacosx-version-min=10.9 \
+    -Os -Wall -Wno-deprecated-declarations -fno-objc-arc \
+    -framework Cocoa -framework Carbon \
+    -o "$BUNDLE/Contents/MacOS/$NAME" \
+    SLWindows.m
 
 echo "Built $BUNDLE"

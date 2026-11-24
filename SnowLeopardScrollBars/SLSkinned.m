@@ -115,7 +115,7 @@ static void SLApertureInstall(void)
         || !class_getInstanceMethod(cls, sel_registerName("drawArrow:highlight:"))
         || !class_getInstanceMethod(cls, sel_registerName("drawKnobSlot"))) return;
     // Named before anything messages the class, so its +initialize finds them.
-    NSBundle *bundle = SLPluginBundle();
+    NSBundle *bundle = [NSBundle bundleForClass:objc_getClass("SLScrollBars")];
     NSArray *paths = [bundle pathsForResourcesOfType:@"tiff" inDirectory:@"ApertureArt"];
     if ([paths count] == 0) return;
     for (NSString *path in paths) {

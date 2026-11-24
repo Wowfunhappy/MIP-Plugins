@@ -26,18 +26,10 @@ cp "$ASSETS/SLScrollArt@2x.bin" "$BUNDLE/Contents/Resources/"
 cp -R "$ASSETS/ArrowStrings/"*.lproj "$BUNDLE/Contents/Resources/"
 cp -R ApertureArt "$BUNDLE/Contents/Resources/"
 
-# The bundle's main executable: no AppKit (SLCarbon.m), so it can go into
-# Carbon apps that have none. It loads SnowLeopardScrollBars-AppKit into apps
-# that have AppKit.
-FLAGS="-arch i386 -arch x86_64 -mmacosx-version-min=10.9 -Os -Wall -Wno-deprecated-declarations -fno-objc-arc -fvisibility=hidden"
-clang -bundle $FLAGS -framework Foundation -framework Carbon \
-    -o "$BUNDLE/Contents/MacOS/$NAME" SLCarbon.m
-clang -bundle $FLAGS -framework Cocoa -framework QuartzCore \
-    -o "$BUNDLE/Contents/MacOS/$NAME-AppKit" \
-    SLScrollBars.m SLDraw.m SLWebKit.m SLArt.m SLCalendar.m SLSkinned.m SLPrefPane.m
-if otool -L "$BUNDLE/Contents/MacOS/$NAME" | grep -q AppKit.framework; then
-    echo "$NAME must not link AppKit." >&2
-    exit 1
-fi
+clang -bundle -arch i386 -arch x86_64 -mmacosx-version-min=10.9 \
+    -Os -Wall -Wno-deprecated-declarations -fno-objc-arc \
+    -framework Cocoa -framework QuartzCore -framework Carbon \
+    -o "$BUNDLE/Contents/MacOS/$NAME" \
+    SLScrollBars.m SLDraw.m SLWebKit.m SLArt.m SLCalendar.m SLSkinned.m SLPrefPane.m SLCarbon.m
 
 echo "Built $BUNDLE"

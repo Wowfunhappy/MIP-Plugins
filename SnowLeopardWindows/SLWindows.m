@@ -1,23 +1,346 @@
 //
 //  SLWindows.m
-//  SnowLeopardWindows' AppKit part (SnowLeopardWindows-AppKit), loaded by the
-//  core (SLWindowsCore.m, which describes the plugin) into apps that have
-//  AppKit: AppKit's title bar button layout and title text, textured
-//  windows' background pattern, and apps' own button and tab images.
+//  Snow Leopard window title bars and title bar buttons for Mavericks (MIP plugin).
+//
+//  AppKit draws window chrome through CoreUI's CUIDraw(), naming the part in
+//  the options dictionary:
+//
+//    titlebarclose, titlebarcollapse,   the title bar buttons; "state" (normal,
+//    titlebarzoom, titlebartoolbar      rollover, pressed, disabled),
+//                                       kCUIPresentationStateKey (ActiveKey,
+//                                       ActiveMain, Inactive), "value" (1 when
+//                                       the document has unsaved changes),
+//                                       "windowtype" (regularwin, utilwin.*)
+//    kCUIWidgetWindowFrame              the title bar / unified toolbar
+//                                       background
+//
+//  Snow Leopard's CoreUI took the same options. This plugin hooks CUIDraw and
+//  draws those parts as 10.6 did; everything else goes to CoreUI unchanged.
+//
+//  Buttons: 10.6's own images, extracted by extract.sh from Snow Leopard's
+//  ArtFile.bin (see extract_art.py), drawn exactly as stored, at 10.6's
+//  positions: in standard windows 10.6 spaced them 7 points apart (Mavericks 6),
+//  8 points from the left edge (Mavericks 7) and a point lower. Utility panels
+//  are laid out the same in both.
+//
+//  Title: 10.6 drew it in black (black at 63% opacity in an inactive window),
+//  with a white shadow one point below and without LCD font smoothing.
+//
+//  Title bar: 10.6 fills it with CUIRenderer::CreateGrayCubicGradientImage,
+//      v(t) = s + D(t^3 - 1.5t^2 - 0.5t),  D = s - e,
+//  from gray 197 to 150 (active) or 233 to 207 (inactive), as an 8-bit gray
+//  image that the system colour-matches to the display like any other art.
+//  Row 0 is a highlight (40% white over the gradient) and, when CoreUI is asked
+//  for a title separator, the last row is the separator line (gray 63, or 135
+//  when inactive). These values (from 10.6's CoreUI code and colour table)
+//  reproduce 10.6 screenshots of active title bars and unified toolbars of any
+//  height, and of inactive ones.
+//
+//  Bottom bar (kCUIWidgetWindowBottomBar): the same, from 191 to 150 (229 to 207
+//  inactive) below a separator. Toolbar baseline (kCUIWidgetToolbarBaselineSeparator):
+//  the separator line.
+//
+//  Textured windows (kCUIWindowTypeTextured; the frame request covers the whole
+//  window): flat gray 150 (207 inactive), the title bar gradient over the top
+//  area, and at the bottom either the bottom bar gradient or, without a bottom
+//  bar, 10 rows from 150 to 125 (207 to 182 inactive). They use the standard
+//  title bar buttons, as in 10.6. Without a toolbar the top area is the title
+//  bar plus 2 points (Mavericks extends it by 75), and the window's background
+//  pattern, which some views paint behind themselves, is drawn the same way.
+//
+//  Apps with their own look: an app can give a window its own NSAppearance,
+//  built from a CoreUI catalog of its own (Reminders' leather, for one); CoreUI
+//  then draws that window's chrome with the appearance's renderer. Those
+//  renderers are passed through untouched, and such windows also keep
+//  Mavericks' button positions, title and textured background: only the
+//  standard (default) appearance gets Snow Leopard's.
 //
 
 #import <Cocoa/Cocoa.h>
-#import "SLWindowsShared.h"
+#import <Carbon/Carbon.h>
 #import <dlfcn.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <libkern/OSAtomic.h>
+
+// CUIDraw returns an OSStatus (callers such as HIToolbox's menu drawing check it).
+typedef OSStatus (*SLCUIDrawFn)(CFTypeRef renderer, CGRect rect, CGContextRef ctx, CFDictionaryRef options, CFDictionaryRef *result);
+typedef void (*SLHookFunctionFn)(void *symbol, void *replacement, void **original);
+
+static SLCUIDrawFn orig_CUIDraw;
+static CFDictionaryRef gArt;            // image name -> CGImageRef
+static CFDictionaryRef gArt2x;          // the same at 2x, for Retina displays
+static CGColorSpaceRef gColorSpace;     // Generic RGB, as 10.6's CoreUI art
+
+@interface SLWindows : NSObject
+@end
+
+// ---- art ------------------------------------------------------------------------
+
+static CFDictionaryRef SLReadArtFile(NSString *resource)
+{
+    NSString *path = [[NSBundle bundleForClass:[SLWindows class]] pathForResource:resource ofType:@"bin"];
+    NSData *data = path ? [NSData dataWithContentsOfFile:path] : nil;
+    const uint8_t *d = [data bytes];
+    size_t len = [data length], p = 8;
+    if (len < 8 || memcmp(d, "SLWA", 4) != 0) return NULL;
+    uint32_t count = OSReadLittleInt32(d, 4);
+
+    CFMutableDictionaryRef art = CFDictionaryCreateMutable(NULL, count, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    for (uint32_t i = 0; i < count; i++) {
+        if (p + 2 > len) break;
+        uint16_t nameLength = OSReadLittleInt16(d, p);
+        if (p + 2 + nameLength + 4 > len) break;
+        CFStringRef name = CFStringCreateWithBytes(NULL, d + p + 2, nameLength, kCFStringEncodingASCII, false);
+        uint16_t w = OSReadLittleInt16(d, p + 2 + nameLength), h = OSReadLittleInt16(d, p + 4 + nameLength);
+        size_t start = p + 6 + nameLength, size = (size_t)w * h * 4;
+        if (start + size > len || !name) { if (name) CFRelease(name); break; }
+
+        // Premultiplied ARGB, as CoreUI stores it.
+        CFDataRef pixels = CFDataCreate(NULL, d + start, size);
+        CGDataProviderRef provider = CGDataProviderCreateWithCFData(pixels);
+        CGImageRef image = CGImageCreate(w, h, 8, 32, w * 4, gColorSpace,
+                                         kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Big,
+                                         provider, NULL, false, kCGRenderingIntentDefault);
+        if (image) CFDictionarySetValue(art, name, image);
+        CGImageRelease(image);
+        CGDataProviderRelease(provider);
+        CFRelease(pixels);
+        CFRelease(name);
+        p = start + size;
+    }
+    return art;
+}
+
+// SLWindowArt.bin: 10.6's 1x images. SLWindowArt@2x.bin: the same images at
+// 2x, rendered by extract.sh from 10.6's recipes (render_hidpi.m).
+static BOOL SLLoadArt(void)
+{
+    gColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceGenericRGB);
+    gArt = SLReadArtFile(@"SLWindowArt");
+    gArt2x = SLReadArtFile(@"SLWindowArt@2x");
+    return gArt && gArt2x && CFDictionaryGetCount(gArt) > 0;
+}
+
+static CGImageRef SLArtImage(NSString *name)
+{
+    return (CGImageRef)CFDictionaryGetValue(gArt, (CFStringRef)name);
+}
+
+// Device pixels per point vertically (2 on Retina displays).
+static int SLContextScale(CGContextRef ctx);
+
+// ---- title bar buttons --------------------------------------------------------------
+
+static NSString *SLButtonImageName(NSDictionary *o)
+{
+    NSString *widget = o[@"widget"];
+    NSString *windowType = o[@"windowtype"] ?: @"regularwin";
+    if ([windowType isEqualToString:@"kCUIWindowTypeTextured"]) windowType = @"regularwin";
+    if ([widget isEqualToString:@"titlebarclose"] && [o[@"value"] intValue] != 0) widget = @"titlebarclosedirty";
+    NSString *colors = [NSColor currentControlTint] == NSGraphiteControlTint ? @"graphite" : @"aqua";
+
+    NSString *state = o[@"state"];
+    NSString *presentation = o[@"kCUIPresentationStateKey"];
+    NSArray *states;
+    if ([state isEqualToString:@"disabled"]) states = @[@"disabled"];
+    else if ([state isEqualToString:@"pressed"]) states = @[@"pressed"];
+    else if ([state isEqualToString:@"rollover"]) states = @[@"rollover"];
+    // (AppKit says a window is inactive in kCUIPresentationStateKey; Carbon,
+    // HIToolbox, in "state".)
+    else if ([presentation isEqualToString:@"kCUIPresentationStateInactive"] || [state isEqualToString:@"inactive"]) states = @[@"inactive"];
+    else if ([presentation isEqualToString:@"kCUIPresentationStateActiveMain"]) states = @[@"activenokey", @"active"];
+    else states = @[@"active", @"key", @"normal"];
+
+    for (NSString *s in states) {
+        NSString *name = [NSString stringWithFormat:@"%@/%@/%@/%@", windowType, widget, colors, s];
+        if (SLArtImage(name)) return name;
+    }
+    return nil;
+}
+
+static void SLDrawButton(NSString *name, CGRect rect, CGContextRef ctx, BOOL flipped)
+{
+    CGImageRef image = SLArtImage(name);
+    CGFloat w = CGImageGetWidth(image), h = CGImageGetHeight(image);
+    // On a Retina display, the 2x rendering of the same image in the same place.
+    CGImageRef image2x = SLContextScale(ctx) >= 2 ? (CGImageRef)CFDictionaryGetValue(gArt2x, (CFStringRef)name) : NULL;
+    if (image2x && CGImageGetWidth(image2x) == 2 * w && CGImageGetHeight(image2x) == 2 * h) image = image2x;
+    // 10.6's images include the button's shadow; centre horizontally, top aligned.
+    CGFloat x = rect.origin.x + floor((rect.size.width - w) / 2);
+    CGFloat top = MAX(0, floor((rect.size.height - h) / 2));
+    CGContextSaveGState(ctx);
+    if (flipped) {
+        CGContextTranslateCTM(ctx, x, rect.origin.y + top + h);
+        CGContextScaleCTM(ctx, 1, -1);
+        CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), image);
+    } else {
+        CGContextDrawImage(ctx, CGRectMake(x, CGRectGetMaxY(rect) - top - h, w, h), image);
+    }
+    CGContextRestoreGState(ctx);
+}
+
+// ---- title bar background -----------------------------------------------------------------
+
+static double SLSeparatorGray(BOOL active)
+{
+    return active ? 63 : 135;
+}
+
+static void SLFillRow(CGContextRef ctx, CGRect rect, int r, BOOL flipped, double gray)
+{
+    CGFloat v = round(gray) / 255;
+    CGFloat components[] = { v, v, v, 1 };
+    CGColorRef color = CGColorCreate(gColorSpace, components);
+    CGContextSetFillColorWithColor(ctx, color);
+    CGColorRelease(color);
+    CGFloat y = flipped ? rect.origin.y + r : CGRectGetMaxY(rect) - 1 - r;
+    CGContextFillRect(ctx, CGRectMake(rect.origin.x, y, rect.size.width, 1));
+}
+
+// Device pixels per point vertically (2 on Retina displays).
+static int SLContextScale(CGContextRef ctx)
+{
+    CGAffineTransform m = CGContextGetUserSpaceToDeviceSpaceTransform(ctx);
+    double scale = sqrt(m.c * m.c + m.d * m.d);
+    return scale >= 1.5 ? (int)lround(scale) : 1;
+}
+
+// 10.6's cubic gradient from s to e over `count` point rows starting at
+// row `first`, evaluated at the centre of every device pixel row.
+static void SLFillGradient(CGContextRef ctx, CGRect rect, int first, int count, BOOL flipped, double s, double e)
+{
+    int scale = SLContextScale(ctx), n = count * scale;
+    double D = s - e;
+    for (int j = 0; j < n; j++) {
+        double t = (j + 0.5) / n;
+        CGFloat v = round(D * t * t * t - 1.5 * D * t * t - 0.5 * D * t + s) / 255;
+        CGFloat components[] = { v, v, v, 1 };
+        CGColorRef color = CGColorCreate(gColorSpace, components);
+        CGContextSetFillColorWithColor(ctx, color);
+        CGColorRelease(color);
+        CGFloat h = 1.0 / scale, offset = first + (CGFloat)j / scale;
+        CGFloat y = flipped ? rect.origin.y + offset : CGRectGetMaxY(rect) - offset - h;
+        CGContextFillRect(ctx, CGRectMake(rect.origin.x, y, rect.size.width, h));
+    }
+}
+
+static void SLDrawBottomBar(CGRect rect, CGContextRef ctx, NSDictionary *o)
+{
+    BOOL active = ![o[@"state"] isEqualToString:@"inactive"];
+    BOOL separator = [o[@"kCUIWindowFrameDrawBottomBarSeparatorKey"] boolValue];
+    BOOL flipped = [o[@"is.flipped"] boolValue];
+    int rows = (int)lround(rect.size.height);
+    int n = rows - (separator ? 1 : 0);
+    if (n < 1) return;
+    double s = active ? 191 : 229, e = active ? 150 : 207;
+    CGContextSaveGState(ctx);
+    CGContextSetBlendMode(ctx, kCGBlendModeSourceAtop);
+    if (separator) SLFillRow(ctx, rect, 0, flipped, SLSeparatorGray(active));
+    SLFillGradient(ctx, rect, separator ? 1 : 0, n, flipped, s, e);
+    CGContextRestoreGState(ctx);
+}
+
+static void SLDrawToolbarSeparator(CGRect rect, CGContextRef ctx, NSDictionary *o)
+{
+    BOOL active = ![o[@"kCUIPresentationStateKey"] isEqualToString:@"kCUIPresentationStateInactive"];
+    BOOL flipped = [o[@"is.flipped"] boolValue];
+    // The line is the toolbar's last row.
+    SLFillRow(ctx, rect, (int)lround(rect.size.height) - 1, flipped, SLSeparatorGray(active));
+}
+
+static void SLDrawTexturedFrameInto(CGRect rect, CGContextRef ctx, NSDictionary *o, BOOL atop)
+{
+    BOOL active = ![o[@"state"] isEqualToString:@"inactive"];
+    BOOL flipped = [o[@"is.flipped"] boolValue];
+    int rows = (int)lround(rect.size.height);
+    int top = MIN(rows, (int)lround([o[@"kCUIWindowFrameUnifiedTitleBarHeightKey"] doubleValue]));
+    int barHeight = (int)lround([o[@"kCUIWindowFrameBottomBarHeightKey"] doubleValue]);
+    int bottom = MIN(rows - top, barHeight > 0 ? barHeight : 10);
+    double flat = active ? 150 : 207;
+    double ts = active ? 197 : 233;
+    double bs = barHeight > 0 ? (active ? 191 : 229) : flat, be = barHeight > 0 ? (active ? 150 : 207) : flat - 25;
+
+    CGContextSaveGState(ctx);
+    if (atop) CGContextSetBlendMode(ctx, kCGBlendModeSourceAtop);
+    CGFloat v = flat / 255, components[] = { v, v, v, 1 };
+    CGColorRef color = CGColorCreate(gColorSpace, components);
+    CGContextSetFillColorWithColor(ctx, color);
+    CGColorRelease(color);
+    CGContextFillRect(ctx, rect);
+    if (top > 1) {
+        SLFillRow(ctx, rect, 0, flipped, ts + 0.4 * (255 - ts));
+        SLFillGradient(ctx, rect, 1, top - 1, flipped, ts, flat);
+    }
+    if (bottom > 0) SLFillGradient(ctx, rect, rows - bottom, bottom, flipped, bs, be);
+    CGContextRestoreGState(ctx);
+}
+
+static void SLDrawTexturedFrame(CGRect rect, CGContextRef ctx, NSDictionary *o)
+{
+    SLDrawTexturedFrameInto(rect, ctx, o, YES);
+}
+
+static void SLDrawTitleBar(CGRect rect, CGContextRef ctx, NSDictionary *o)
+{
+    BOOL active = ![o[@"state"] isEqualToString:@"inactive"];
+    BOOL separator = [o[@"kCUIWindowFrameDrawTitleSeparatorKey"] boolValue];
+    BOOL flipped = [o[@"is.flipped"] boolValue];
+    int rows = (int)lround(rect.size.height);
+    int n = rows - 1 - (separator ? 1 : 0);
+    if (n < 1) return;
+
+    double s = active ? 197 : 233, e = active ? 150 : 207;
+    double highlight = s + 0.4 * (255 - s);
+
+    CGContextSaveGState(ctx);
+    // Only where CoreUI has just drawn the title bar, so the window keeps its
+    // rounded corners and outline.
+    CGContextSetBlendMode(ctx, kCGBlendModeSourceAtop);
+    SLFillRow(ctx, rect, 0, flipped, highlight);
+    SLFillGradient(ctx, rect, 1, n, flipped, s, e);
+    for (int r = n + 1; r < rows; r++) SLFillRow(ctx, rect, r, flipped, SLSeparatorGray(active));
+    CGContextRestoreGState(ctx);
+}
+
+// A standard window's frame. AppKit asks for its title bar (and unified
+// toolbar) alone; a Carbon window (HIToolbox) asks for the whole window at
+// once, saying how tall its title bar and unified toolbar are
+// (kCUIWindowFrameUnifiedTitleBarHeightKey) and its bottom bar
+// (kCUIWindowFrameBottomBarHeightKey). Then the title bar gradient goes over
+// the top that tall, and the bottom bar's (as AppKit's bottom bars get it,
+// with its separator if asked for) over the bottom; the window's body between
+// them is CoreUI's, as in AppKit's windows.
+static void SLDrawRegularFrame(CGRect rect, CGContextRef ctx, NSDictionary *o)
+{
+    BOOL flipped = [o[@"is.flipped"] boolValue];
+    CGFloat height = rect.size.height;
+    CGFloat top = round([o[@"kCUIWindowFrameUnifiedTitleBarHeightKey"] doubleValue]);
+    if (top <= 0 || top >= height) {
+        SLDrawTitleBar(rect, ctx, o);
+        return;
+    }
+    // Rows count from the top: in a flipped context the top is the rectangle's minimum y.
+    CGRect title = rect;
+    title.size.height = top;
+    if (!flipped) title.origin.y = CGRectGetMaxY(rect) - top;
+    SLDrawTitleBar(title, ctx, o);
+
+    CGFloat bottom = round([o[@"kCUIWindowFrameBottomBarHeightKey"] doubleValue]);
+    if (bottom > 0 && top + bottom <= height) {
+        CGRect bar = rect;
+        bar.size.height = bottom;
+        if (flipped) bar.origin.y = CGRectGetMaxY(rect) - bottom;
+        SLDrawBottomBar(bar, ctx, o);
+    }
+}
 
 // ---- windows with their own appearance ---------------------------------------------------
 
 // The CoreUI renderers of non-default NSAppearances (an app's own theme), as
-// they are handed out, go to the core (gRegisterRenderer), whose CUIDraw hook
-// passes their drawing through unchanged.
-static SLRegisterRendererFn gRegisterRenderer;
+// they are handed out; CUIDraw passes their drawing through unchanged.
+static CFMutableSetRef gCustomRenderers;
+static OSSpinLock gCustomRenderersLock = OS_SPINLOCK_INIT;
 static void *(*orig_coreUIRenderer)(id, SEL);
 
 static BOOL SLIsDefaultAppearance(id appearance)
@@ -29,8 +352,21 @@ static BOOL SLIsDefaultAppearance(id appearance)
 static void *sl_coreUIRenderer(id self, SEL _cmd)
 {
     void *renderer = orig_coreUIRenderer(self, _cmd);
-    if (renderer && !SLIsDefaultAppearance(self)) gRegisterRenderer(renderer);
+    if (renderer && !SLIsDefaultAppearance(self)) {
+        OSSpinLockLock(&gCustomRenderersLock);
+        CFSetAddValue(gCustomRenderers, renderer);
+        OSSpinLockUnlock(&gCustomRenderersLock);
+    }
     return renderer;
+}
+
+static BOOL SLIsCustomRenderer(CFTypeRef renderer)
+{
+    if (!renderer || !gCustomRenderers) return NO;
+    OSSpinLockLock(&gCustomRenderersLock);
+    BOOL custom = CFSetContainsValue(gCustomRenderers, renderer);
+    OSSpinLockUnlock(&gCustomRenderersLock);
+    return custom;
 }
 
 // A window frame whose window has a non-default appearance of its own.
@@ -46,6 +382,7 @@ static void SLHookAppearance(void)
     Method m = appearance ? class_getInstanceMethod(appearance, sel_registerName("_coreUIRenderer")) : NULL;
     if (!m || strncmp(method_getTypeEncoding(m), "^", 1) != 0 ||
         !class_getInstanceMethod(appearance, sel_registerName("_isDefaultAppearance"))) return;
+    gCustomRenderers = CFSetCreateMutable(NULL, 0, NULL);
     orig_coreUIRenderer = (void *)method_setImplementation(m, (IMP)sl_coreUIRenderer);
 }
 
@@ -315,7 +652,7 @@ static id (*orig_imageNamed)(id, SEL, NSString *);
 // by the same names, where it has the image.
 static NSString *SLSnowLeopardTabPath(NSString *name)
 {
-    NSString *dir = [[gSLBundlePath stringByAppendingPathComponent:@"Contents/Resources"] stringByAppendingPathComponent:@"SLTabArt"];
+    NSString *dir = [[[NSBundle bundleForClass:[SLWindows class]] resourcePath] stringByAppendingPathComponent:@"SLTabArt"];
     NSString *path = [[dir stringByAppendingPathComponent:name] stringByAppendingPathExtension:@"png"];
     return [[NSFileManager defaultManager] fileExistsAtPath:path] ? path : nil;
 }
@@ -423,7 +760,7 @@ static NSImage *SLRetonedTabButton(NSImage *image, NSString *referenceName)
 static NSString *SLQuickTimeArtPath(NSString *name)
 {
     if ([name rangeOfString:@"/"].location != NSNotFound) return nil;
-    NSString *dir = [[gSLBundlePath stringByAppendingPathComponent:@"Contents/Resources"] stringByAppendingPathComponent:@"SLQuickTimeArt"];
+    NSString *dir = [[[NSBundle bundleForClass:[SLWindows class]] resourcePath] stringByAppendingPathComponent:@"SLQuickTimeArt"];
     NSString *path = [[dir stringByAppendingPathComponent:name] stringByAppendingPathExtension:@"tiff"];
     return [[NSFileManager defaultManager] fileExistsAtPath:path] ? path : nil;
 }
@@ -447,7 +784,7 @@ static NSString *SLAppIdentifier(void)
 static NSImage *SLStandardButton(NSString *widget, NSString *colors, NSString *state)
 {
     NSString *name = [NSString stringWithFormat:@"regularwin/%@/%@/%@", widget, colors, state];
-    CGImageRef image1x = SLArtImage(name), image2x = SLArt2xImage(name);
+    CGImageRef image1x = SLArtImage(name), image2x = (CGImageRef)CFDictionaryGetValue(gArt2x, (CFStringRef)name);
     if (!image1x) return nil;
     NSSize size = NSMakeSize(CGImageGetWidth(image1x), CGImageGetHeight(image1x));
     NSImage *image = [[[NSImage alloc] initWithSize:size] autorelease];
@@ -613,14 +950,125 @@ static void SLHookTabArt(void)
     if (m) orig_imageForResource = (void *)method_setImplementation(m, (IMP)sl_imageForResource);
 }
 
+// ---- CUIDraw ----------------------------------------------------------------------------
+
+static BOOL SLIsSnowLeopardWindowType(NSString *windowType)
+{
+    return !windowType || [windowType isEqualToString:@"regularwin"] || [windowType hasPrefix:@"utilwin"]
+        || [windowType isEqualToString:@"kCUIWindowTypeTextured"];
+}
+
+static OSStatus sl_CUIDraw(CFTypeRef renderer, CGRect rect, CGContextRef ctx, CFDictionaryRef options, CFDictionaryRef *result)
+{
+    NSDictionary *o = (NSDictionary *)options;
+    NSString *widget = [o isKindOfClass:[NSDictionary class]] ? o[@"widget"] : nil;
+    if (!ctx || ![widget isKindOfClass:[NSString class]] || [o[@"kCUIMaskOnlyKey"] boolValue] || !SLIsSnowLeopardWindowType(o[@"windowtype"])
+        || SLIsCustomRenderer(renderer))
+        return orig_CUIDraw(renderer, rect, ctx, options, result);
+
+    if ([widget hasPrefix:@"titlebar"]) {
+        NSString *name = SLButtonImageName(o);
+        if (name) {
+            BOOL flipped = [o[@"is.flipped"] boolValue];
+            // A Carbon window (HIToolbox, which aligns the art in the
+            // rectangle: kCUIHorizontalAlignmentKey) asks for a button offset
+            // from its view, and clips to the view: a standard window's a
+            // point left of and above it, a utility window's a point right of
+            // and two below it. 10.6's button fills the view (where AppKit's
+            // utility windows put theirs, too).
+            if (o[@"kCUIHorizontalAlignmentKey"]) {
+                NSString *type = o[@"windowtype"];
+                if ([type isEqualToString:@"regularwin"]) rect = CGRectOffset(rect, 1, flipped ? 1 : -1);
+                else if ([type hasPrefix:@"utilwin"]) rect = CGRectOffset(rect, -1, flipped ? -2 : 2);
+            }
+            SLDrawButton(name, rect, ctx, flipped);
+            return noErr;
+        }
+    } else if ([widget isEqualToString:@"kCUIWidgetWindowFrame"]) {
+        OSStatus status = orig_CUIDraw(renderer, rect, ctx, options, result);
+        if ([o[@"windowtype"] isEqualToString:@"kCUIWindowTypeTextured"]) SLDrawTexturedFrame(rect, ctx, o);
+        else SLDrawRegularFrame(rect, ctx, o);
+        return status;
+    } else if ([widget isEqualToString:@"kCUIWidgetWindowBottomBar"] && o[@"windowtype"]) {
+        OSStatus status = orig_CUIDraw(renderer, rect, ctx, options, result);
+        SLDrawBottomBar(rect, ctx, o);
+        return status;
+    } else if ([widget isEqualToString:@"kCUIWidgetToolbarBaselineSeparator"] && o[@"windowtype"]) {
+        SLDrawToolbarSeparator(rect, ctx, o);
+        return noErr;
+    }
+    return orig_CUIDraw(renderer, rect, ctx, options, result);
+}
+
+// ---- Carbon windows' buttons ---------------------------------------------------------------
+//
+// A Carbon window (HIToolbox) lays out its own title bar buttons
+// (HIWindowFrameView::GetWidgetFrame), at Mavericks' positions: 7, 27 and 47
+// points from the left. In standard windows 10.6 put them at 8, 29 and 50, as
+// AppKit's (SLHookLayout); utility windows' are the same in both. Each button
+// is placed after the one before it (its current frame), so each moves a
+// point further than that one. (Carbon windows exist only in 32-bit processes.)
+
+#if !__LP64__
+typedef void *(*SLFindSymbolFn)(const void *image, const char *name);
+typedef const void *(*SLGetImageFn)(const char *name);
+
+static uintptr_t (*orig_getWidgetFrame)(void *, void *, unsigned, CGRect *);
+static WindowRef (*SLHIViewGetWindowRef)(void *);       // HIView::GetWindowRef()
+
+static uintptr_t sl_getWidgetFrame(void *self, void *unused, unsigned part, CGRect *frame)
+{
+    uintptr_t result = orig_getWidgetFrame(self, unused, part, frame);
+    if (!frame || (part != 'clos' && part != 'coll' && part != 'zoom')) return result;
+    WindowRef window = SLHIViewGetWindowRef(self);
+    WindowClass windowClass;
+    if (!window || GetWindowClass(window, &windowClass) != noErr
+        || windowClass == kUtilityWindowClass || windowClass == kFloatingWindowClass) return result;
+    frame->origin.x += 1;
+    return result;
+}
+
+static void SLHookCarbonLayout(SLHookFunctionFn hook)
+{
+    SLFindSymbolFn find = (SLFindSymbolFn)dlsym(RTLD_DEFAULT, "MSFindSymbol");
+    SLGetImageFn image = (SLGetImageFn)dlsym(RTLD_DEFAULT, "MSGetImageByName");
+    const void *hitoolbox = image ? image("/System/Library/Frameworks/Carbon.framework/Versions/A/Frameworks/HIToolbox.framework/Versions/A/HIToolbox") : NULL;
+    if (!find || !hitoolbox) return;
+    void *getWidgetFrame = find(hitoolbox, "__ZN17HIWindowFrameView14GetWidgetFrameEPvmP6CGRect");
+    SLHIViewGetWindowRef = find(hitoolbox, "__ZN6HIView12GetWindowRefEv");
+    if (!getWidgetFrame || !SLHIViewGetWindowRef) return;
+    hook(getWidgetFrame, (void *)sl_getWidgetFrame, (void **)&orig_getWidgetFrame);
+}
+#else
+static void SLHookCarbonLayout(SLHookFunctionFn hook) {}
+#endif
+
 static id (*orig_appInit)(id, SEL);
 
+// The window chrome CoreUI draws, for AppKit's windows and Carbon's alike, and
+// Carbon's button layout: at once, as a Carbon app never creates NSApp (the
+// plugin is listed for apps with HIToolbox too). Neither touches the window
+// server.
+static BOOL SLSetUpChrome(void)
+{
+    SLHookFunctionFn hook = (SLHookFunctionFn)dlsym(RTLD_DEFAULT, "MSHookFunction");
+    void *cuiDraw = dlsym(RTLD_DEFAULT, "CUIDraw");
+    if (!hook || !cuiDraw) return NO;
+    if (!SLLoadArt()) {
+        NSLog(@"SnowLeopardWindows: the bundle's art is missing or unreadable.");
+        return NO;
+    }
+    hook(cuiDraw, (void *)sl_CUIDraw, (void **)&orig_CUIDraw);
+    SLHookCarbonLayout(hook);
+    return YES;
+}
+
+// AppKit's side, once the process has its application object.
 static void SLSetUp(void)
 {
     static BOOL done = NO;
     if (done) return;
     done = YES;
-    if (!SLLoadArt()) return;           // (the core says so)
     SLHookAppearance();
     SLHookLayout();
     SLHookTitle();
@@ -635,19 +1083,19 @@ static id sl_appInit(id self, SEL _cmd)
     return self;
 }
 
+@implementation SLWindows
+
 /* Nothing is set up until the process has its application object. MIP can
    load the plugin before that exists (AppKit's open/save panel service checks
    in with Launch Services and then waits for a client before creating NSApp
    and its window server connection); touching the window server in between
    breaks that service. So: with NSApp already there (normal applications,
    where MIP loads the plugin inside -[NSApplication init]), set up now;
-   otherwise as soon as -[NSApplication init] returns. Called by the core
-   (SLWindowsCore.m) once the process has AppKit. */
-__attribute__((visibility("default"))) void SLWindowsAppKitStart(const char *bundlePath, SLRegisterRendererFn registerRenderer)
+   otherwise as soon as -[NSApplication init] returns. */
++ (void)load
 {
     if (floor(NSAppKitVersionNumber) != 1265) return;     // Mavericks' AppKit only
-    gSLBundlePath = [[NSString alloc] initWithUTF8String:bundlePath];
-    gRegisterRenderer = registerRenderer;
+    if (!SLSetUpChrome()) return;
     if (NSApp && [NSThread isMainThread]) {
         SLSetUp();
     } else {
@@ -655,3 +1103,5 @@ __attribute__((visibility("default"))) void SLWindowsAppKitStart(const char *bun
         if (init) orig_appInit = (void *)method_setImplementation(init, (IMP)sl_appInit);
     }
 }
+
+@end

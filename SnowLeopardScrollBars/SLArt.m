@@ -45,7 +45,8 @@ static inline uint16_t LE16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] <
 // name ("<resID>/<index>"), uint16 width, uint16 height, premultiplied ARGB.
 static BOOL SLTwinArtLoad(void)
 {
-    NSString *path = [SLPluginBundle() pathForResource:@"SLScrollArt@2x" ofType:@"bin"];
+    Class cls = objc_getClass("SLScrollBars");
+    NSString *path = cls ? [[NSBundle bundleForClass:cls] pathForResource:@"SLScrollArt@2x" ofType:@"bin"] : nil;
     NSData *data = path ? [NSData dataWithContentsOfFile:path] : nil;
     const uint8_t *d = [data bytes];
     size_t len = [data length], p = 8;

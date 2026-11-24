@@ -829,7 +829,7 @@ static CGFloat sl_impKnobEndInset(id self, SEL _cmd)
 // scroll views (and WebKit) follow that notification. Adjusting the value
 // there keeps that machinery working when the setting is switched.
 
-static BOOL SLScrollBarsOnlyWhenScrolling(void)
+BOOL SLScrollBarsOnlyWhenScrolling(void)
 {
     NSString *setting = [[NSUserDefaults standardUserDefaults] stringForKey:@"AppleShowScrollBars"];
     return [setting isEqualToString:@"WhenScrolling"];
@@ -1056,24 +1056,18 @@ static id sl_appInit(id self, SEL _cmd)
     return self;
 }
 
-@end
-
-
-// The plugin bundle (its resources), as the core gives it.
-static NSBundle *gPluginBundle;
-NSBundle *SLPluginBundle(void) { return gPluginBundle; }
-
-// SnowLeopardScrollBars-AppKit's entry point: called by the bundle's main
-// executable (SLCarbon.m) once the process has AppKit.
-__attribute__((visibility("default"))) void SLScrollBarsAppKitStart(const char *bundlePath)
++ (void)load
 {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-    gPluginBundle = [[NSBundle alloc] initWithPath:[NSString stringWithUTF8String:bundlePath]];
+    // Carbon scroll bars (SLCarbon.m) at once: a Carbon app never creates NSApp.
+    if (floor(NSAppKitVersionNumber) == 1265) SLCarbonInstall();
     if (NSApp) {
-        if ([NSThread isMainThread]) [SLScrollBars setUpScrollBars];
-        else [SLScrollBars performSelectorOnMainThread:@selector(setUpScrollBars) withObject:nil waitUntilDone:NO];
+        if ([NSThread isMainThread]) [self setUpScrollBars];
+        else [self performSelectorOnMainThread:@selector(setUpScrollBars) withObject:nil waitUntilDone:NO];
     } else {
         SLHook([NSApplication class], @selector(init), (IMP)sl_appInit, (IMP *)&SL_ORIG(appInit));
     }
     [pool drain];
 }
+
+@end

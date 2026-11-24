@@ -21,5 +21,7 @@
 		<string>com.apple.AppKit</string>
 		<string>com.apple.HIToolbox</string>
 	</array>
+	<key>NSPrincipalClass</key>
+	<string>SLWindows</string>
 </dict>
 </plist>
