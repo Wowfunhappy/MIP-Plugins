@@ -25,7 +25,7 @@ cp -R "$ASSETS/SLWindowArt.bin" "$ASSETS/SLWindowArt@2x.bin" "$ASSETS/SLTabArt" 
 
 clang -bundle -arch i386 -arch x86_64 -mmacosx-version-min=10.9 \
     -Os -Wall -Wno-deprecated-declarations -fno-objc-arc \
-    -framework Cocoa -framework Carbon \
+    -framework Cocoa -framework Carbon -framework QuartzCore \
     -o "$BUNDLE/Contents/MacOS/$NAME" \
     SLWindows.m
 

@@ -58,6 +58,7 @@
 
 #import <Cocoa/Cocoa.h>
 #import <Carbon/Carbon.h>
+#import <QuartzCore/QuartzCore.h>
 #import <dlfcn.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -600,79 +601,8 @@ static id sl_inactiveTextured(id self, SEL _cmd)
     return (SLFrameHasCustomAppearance(self) ? nil : SLTexturedPattern(self, NO)) ?: orig_inactiveTextured(self, _cmd);
 }
 
-// A layer-backed window frame normally has CoreUI build it a tree of layers
-// (CUICreateOrUpdateLayer) instead of drawing; have the frames of standard and
-// textured titled windows draw, through CUIDraw, like any other view. (Menus
-// and other untitled windows keep their layers.)
-//
-// Only once the frame has its layer: before, AppKit asks the same question to
-// decide whether to give it one (-[NSView _doSetWantsLayerYES] layer-backs the
-// frame with the content view only if the frame wants -updateLayer). A frame
-// left without a layer has its toolbar drawn straight into the window, where
-// an item that draws with NSCompositeCopy (Numbers' Zoom pop-up) clears the
-// window around it to transparent, instead of only its own layer.
-//
-// Their toolbars too: a layer-backed toolbar using -updateLayer has its
-// baseline in a view of its own showing Mavericks' separator image
-// (-[NSToolbarView layout] adds it only then); drawing, it draws the baseline
-// through CUIDraw (kCUIWidgetToolbarBaselineSeparator), so in 10.6's tone.
-static BOOL SLWindowDrawsFrame(NSWindow *window)
-{
-    NSUInteger mask = [window styleMask];
-    return window && (mask & NSTitledWindowMask) && !(mask & NSHUDWindowMask) && ![window isKindOfClass:NSClassFromString(@"NSCarbonMenuWindow")];
-}
-
-static BOOL (*orig_frameWantsUpdateLayer)(id, SEL);
-
-static BOOL sl_frameWantsUpdateLayer(id self, SEL _cmd)
-{
-    if ([self layer] && SLWindowDrawsFrame([self window])) return NO;
-    return orig_frameWantsUpdateLayer(self, _cmd);
-}
-
-// Drawing into its layer, the frame keeps what it drew before outside the
-// rectangles it is asked to redraw - and when the title changes, AppKit asks
-// for the new title's rectangle only (Mavericks' frame, a tree of layers,
-// never paints a title over an old one). So a title that moves - "Untitled"
-// becoming "Untitled — Edited" - would be drawn over the old one, still
-// there. Any redraw of part of the title bar redraws the whole title bar.
-static void (*orig_frameSetNeedsDisplayInRect)(id, SEL, NSRect);
-
-static void sl_frameSetNeedsDisplayInRect(id self, SEL _cmd, NSRect rect)
-{
-    if ([self layer] && SLWindowDrawsFrame([self window]) && [self respondsToSelector:@selector(titlebarRect)]) {
-        NSRect titlebar = ((NSRect (*)(id, SEL))objc_msgSend_stret)(self, @selector(titlebarRect));
-        if (NSIntersectsRect(rect, titlebar)) rect = NSUnionRect(rect, titlebar);
-    }
-    orig_frameSetNeedsDisplayInRect(self, _cmd, rect);
-}
-
-static BOOL (*orig_toolbarWantsUpdateLayer)(id, SEL);
-
-static BOOL sl_toolbarWantsUpdateLayer(id self, SEL _cmd)
-{
-    if (SLWindowDrawsFrame([self window])) return NO;
-    return orig_toolbarWantsUpdateLayer(self, _cmd);
-}
-
 static void SLHookTextured(void)
 {
-    Class themeFrame = NSClassFromString(@"NSThemeFrame");
-    Method wants = themeFrame ? class_getInstanceMethod(themeFrame, @selector(wantsUpdateLayer)) : NULL;
-    if (wants) orig_frameWantsUpdateLayer = (void *)class_replaceMethod(themeFrame, @selector(wantsUpdateLayer), (IMP)sl_frameWantsUpdateLayer, method_getTypeEncoding(wants));
-    if (!orig_frameWantsUpdateLayer && wants) orig_frameWantsUpdateLayer = (void *)method_getImplementation(wants);
-    Class toolbarView = NSClassFromString(@"NSToolbarView");
-    Method toolbarWants = toolbarView ? class_getInstanceMethod(toolbarView, @selector(wantsUpdateLayer)) : NULL;
-    if (toolbarWants) {
-        orig_toolbarWantsUpdateLayer = (void *)method_getImplementation(toolbarWants);   // (inherited: NSView's)
-        class_replaceMethod(toolbarView, @selector(wantsUpdateLayer), (IMP)sl_toolbarWantsUpdateLayer, method_getTypeEncoding(toolbarWants));
-    }
-    Method needsDisplay = themeFrame ? class_getInstanceMethod(themeFrame, @selector(setNeedsDisplayInRect:)) : NULL;
-    if (needsDisplay) {
-        orig_frameSetNeedsDisplayInRect = (void *)method_getImplementation(needsDisplay);   // (inherited: NSView's)
-        class_replaceMethod(themeFrame, @selector(setNeedsDisplayInRect:), (IMP)sl_frameSetNeedsDisplayInRect, method_getTypeEncoding(needsDisplay));
-    }
-
     Class frame = NSClassFromString(@"NSThemeFrame");
     Method options = class_getInstanceMethod(frame, sel_registerName("_cuiOptionsForWindowType:topHeight:drawTopSeparator:bottomBarHeight:shouldSetScaleKey:"));
     Method active = class_getInstanceMethod(frame, sel_registerName("_activeTexturedWindowColor"));
@@ -1049,6 +979,121 @@ static OSStatus sl_CUIDraw(CFTypeRef renderer, CGRect rect, CGContextRef ctx, CF
     return orig_CUIDraw(renderer, rect, ctx, options, result);
 }
 
+// ---- layer-backed window frames ----------------------------------------------------
+//
+// A layer-backed window's frame (NSThemeFrame, in apps such as Numbers or
+// Calendar) doesn't draw: CoreUI builds its background as a tree of layers
+// (CUICreateOrUpdateLayer: gradient, separator, border and corner layers), and
+// AppKit puts the title, buttons and toolbar baseline in views of their own.
+// CoreUI's layers never go through CUIDraw, so here, for the frames whose art
+// is replaced, CUICreateOrUpdateLayer hands out a layer of the plugin's own
+// instead, whose contents are the frame drawn by CUIDraw (sl_CUIDraw), with
+// the options AppKit asked for. Everything else stays as AppKit has it: the
+// background layer's delegate (NSThemeFrameBackgroundDelegate) displays it by
+// calling CUICreateOrUpdateLayer again, which redraws it; and it is redrawn
+// when its size changes.
+
+@interface SLWindowFrameLayer : CALayer
+@end
+
+@implementation SLWindowFrameLayer
+@end
+
+typedef int (*SLCUICreateOrUpdateLayerFn)(CFTypeRef renderer, CFDictionaryRef options, CALayer **layer);
+static SLCUICreateOrUpdateLayerFn orig_CUICreateOrUpdateLayer;
+static CFStringRef gCUIScaleKey;     // CoreUI's kCUIScaleKey
+
+static void SLDrawFrameLayer(SLWindowFrameLayer *layer, CFTypeRef renderer, NSDictionary *options)
+{
+    // Drawn in the window's color space, as a frame drawn into the window is.
+    id delegate = layer.delegate;
+    NSWindow *window = [delegate respondsToSelector:@selector(view)] ? [[delegate view] window] : nil;
+    CGColorSpaceRef space = [[window colorSpace] CGColorSpace];
+    CGRect bounds = layer.bounds;
+    CGFloat scale = layer.contentsScale;
+    size_t width = (size_t)ceil(bounds.size.width * scale), height = (size_t)ceil(bounds.size.height * scale);
+    CGImageRef image = NULL;
+    if (space && width && height) {
+        CGContextRef ctx = CGBitmapContextCreate(NULL, width, height, 8, 0, space, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Host);
+        if (ctx) {
+            CGContextScaleCTM(ctx, scale, scale);
+            NSMutableDictionary *o = [[options mutableCopy] autorelease];
+            o[@"is.flipped"] = @NO;
+            o[(id)gCUIScaleKey] = @(scale);     // the bitmap's, as a frame drawn into the window gets its backing scale
+            sl_CUIDraw(renderer, CGRectMake(0, 0, bounds.size.width, bounds.size.height), ctx, (CFDictionaryRef)o, NULL);
+            image = CGBitmapContextCreateImage(ctx);
+            CGContextRelease(ctx);
+        }
+    }
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    layer.contents = (id)image;
+    [CATransaction commit];
+    if (image) CGImageRelease(image);
+}
+
+static int sl_CUICreateOrUpdateLayer(CFTypeRef renderer, CFDictionaryRef options, CALayer **layer)
+{
+    NSDictionary *o = (NSDictionary *)options;
+    if (!layer || ![o isKindOfClass:[NSDictionary class]] || ![o[@"widget"] isEqual:@"kCUIWidgetWindowFrame"]
+        || !SLIsSnowLeopardWindowType(o[@"windowtype"]) || SLIsCustomRenderer(renderer)
+        || (*layer && ![*layer isKindOfClass:[SLWindowFrameLayer class]]))   // CoreUI's, from before the plugin loaded
+        return orig_CUICreateOrUpdateLayer(renderer, options, layer);
+
+    SLWindowFrameLayer *frameLayer = (SLWindowFrameLayer *)*layer;
+    if (!frameLayer) {
+        frameLayer = [[SLWindowFrameLayer alloc] init];    // the caller's, as CoreUI's would be
+        frameLayer.needsDisplayOnBoundsChange = YES;
+        *layer = frameLayer;
+    }
+    SLDrawFrameLayer(frameLayer, renderer, o);
+    return 0;
+}
+
+// The toolbar's baseline in such a window is a view of its own, showing an
+// image AppKit makes by filling two rows (-[NSToolbarView _updateBaselineView]):
+// the line, in _baselineBottomColor, and a highlight above it, in
+// _baselineBottomAboveColor. Drawn into the window, AppKit draws the same line
+// through CUIDraw (kCUIWidgetToolbarBaselineSeparator; sl_CUIDraw). So under a
+// frame drawn by SLWindowFrameLayer, the line is 10.6's separator and there is
+// no highlight. ("Active" as AppKit names the image it caches: the window is
+// key.)
+static BOOL SLWindowHasSnowLeopardFrameLayer(NSWindow *window)
+{
+    NSView *frame = [[window contentView] superview];
+    SEL backgroundLayer = sel_registerName("_backgroundLayer");
+    if (![frame respondsToSelector:backgroundLayer]) return NO;
+    return [((id (*)(id, SEL))objc_msgSend)(frame, backgroundLayer) isKindOfClass:[SLWindowFrameLayer class]];
+}
+
+static id (*orig_baselineBottomColor)(id, SEL);
+static id (*orig_baselineBottomAboveColor)(id, SEL);
+
+static id sl_baselineBottomColor(id self, SEL _cmd)
+{
+    NSWindow *window = [self window];
+    if (!SLWindowHasSnowLeopardFrameLayer(window)) return orig_baselineBottomColor(self, _cmd);
+    SEL keyIgnoringFocus = sel_registerName("_isKeyWindowIgnoringFocus");
+    BOOL active = [window respondsToSelector:keyIgnoringFocus] ? ((BOOL (*)(id, SEL))objc_msgSend)(window, keyIgnoringFocus) : [window isKeyWindow];
+    return [NSColor colorWithCalibratedWhite:SLSeparatorGray(active) / 255 alpha:1];
+}
+
+static id sl_baselineBottomAboveColor(id self, SEL _cmd)
+{
+    return SLWindowHasSnowLeopardFrameLayer([self window]) ? [NSColor clearColor] : orig_baselineBottomAboveColor(self, _cmd);
+}
+
+static void SLHookBaseline(void)
+{
+    Class toolbarView = NSClassFromString(@"NSToolbarView");
+    Method bottom = class_getInstanceMethod(toolbarView, sel_registerName("_baselineBottomColor"));
+    Method above = class_getInstanceMethod(toolbarView, sel_registerName("_baselineBottomAboveColor"));
+    if (bottom && above) {
+        orig_baselineBottomColor = (void *)method_setImplementation(bottom, (IMP)sl_baselineBottomColor);
+        orig_baselineBottomAboveColor = (void *)method_setImplementation(above, (IMP)sl_baselineBottomAboveColor);
+    }
+}
+
 // ---- Carbon windows' buttons ---------------------------------------------------------------
 //
 // A Carbon window (HIToolbox) lays out its own title bar buttons
@@ -1108,6 +1153,14 @@ static BOOL SLSetUpChrome(void)
         return NO;
     }
     hook(cuiDraw, (void *)sl_CUIDraw, (void **)&orig_CUIDraw);
+    void *createLayer = dlsym(RTLD_DEFAULT, "CUICreateOrUpdateLayer");
+    CFStringRef *scaleKey = dlsym(RTLD_DEFAULT, "kCUIScaleKey");
+    if (!createLayer || !scaleKey) {
+        NSLog(@"SnowLeopardWindows: CoreUI has no CUICreateOrUpdateLayer or kCUIScaleKey; layer-backed windows keep Mavericks' frames.");
+    } else {
+        gCUIScaleKey = *scaleKey;
+        hook(createLayer, (void *)sl_CUICreateOrUpdateLayer, (void **)&orig_CUICreateOrUpdateLayer);
+    }
     SLHookCarbonLayout(hook);
     return YES;
 }
@@ -1122,6 +1175,7 @@ static void SLSetUp(void)
     SLHookLayout();
     SLHookTitle();
     SLHookTextured();
+    SLHookBaseline();
     SLHookTabArt();
 }
 
