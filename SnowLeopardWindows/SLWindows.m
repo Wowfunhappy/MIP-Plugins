@@ -630,6 +630,23 @@ static BOOL sl_frameWantsUpdateLayer(id self, SEL _cmd)
     return orig_frameWantsUpdateLayer(self, _cmd);
 }
 
+// Drawing into its layer, the frame keeps what it drew before outside the
+// rectangles it is asked to redraw - and when the title changes, AppKit asks
+// for the new title's rectangle only (Mavericks' frame, a tree of layers,
+// never paints a title over an old one). So a title that moves - "Untitled"
+// becoming "Untitled — Edited" - would be drawn over the old one, still
+// there. Any redraw of part of the title bar redraws the whole title bar.
+static void (*orig_frameSetNeedsDisplayInRect)(id, SEL, NSRect);
+
+static void sl_frameSetNeedsDisplayInRect(id self, SEL _cmd, NSRect rect)
+{
+    if ([self layer] && SLWindowDrawsFrame([self window]) && [self respondsToSelector:@selector(titlebarRect)]) {
+        NSRect titlebar = ((NSRect (*)(id, SEL))objc_msgSend_stret)(self, @selector(titlebarRect));
+        if (NSIntersectsRect(rect, titlebar)) rect = NSUnionRect(rect, titlebar);
+    }
+    orig_frameSetNeedsDisplayInRect(self, _cmd, rect);
+}
+
 static BOOL (*orig_toolbarWantsUpdateLayer)(id, SEL);
 
 static BOOL sl_toolbarWantsUpdateLayer(id self, SEL _cmd)
@@ -649,6 +666,11 @@ static void SLHookTextured(void)
     if (toolbarWants) {
         orig_toolbarWantsUpdateLayer = (void *)method_getImplementation(toolbarWants);   // (inherited: NSView's)
         class_replaceMethod(toolbarView, @selector(wantsUpdateLayer), (IMP)sl_toolbarWantsUpdateLayer, method_getTypeEncoding(toolbarWants));
+    }
+    Method needsDisplay = themeFrame ? class_getInstanceMethod(themeFrame, @selector(setNeedsDisplayInRect:)) : NULL;
+    if (needsDisplay) {
+        orig_frameSetNeedsDisplayInRect = (void *)method_getImplementation(needsDisplay);   // (inherited: NSView's)
+        class_replaceMethod(themeFrame, @selector(setNeedsDisplayInRect:), (IMP)sl_frameSetNeedsDisplayInRect, method_getTypeEncoding(needsDisplay));
     }
 
     Class frame = NSClassFromString(@"NSThemeFrame");
