@@ -971,11 +971,16 @@ static OSStatus sl_CUIDraw(CFTypeRef renderer, CGRect rect, CGContextRef ctx, CF
         if (name) {
             BOOL flipped = [o[@"is.flipped"] boolValue];
             // A Carbon window (HIToolbox, which aligns the art in the
-            // rectangle: kCUIHorizontalAlignmentKey) asks for a standard
-            // window's button a point left of and above its view, and clips
-            // to the view: 10.6's button fills the view.
-            if (o[@"kCUIHorizontalAlignmentKey"] && [o[@"windowtype"] isEqualToString:@"regularwin"])
-                rect = CGRectOffset(rect, 1, flipped ? 1 : -1);
+            // rectangle: kCUIHorizontalAlignmentKey) asks for a button offset
+            // from its view, and clips to the view: a standard window's a
+            // point left of and above it, a utility window's a point right of
+            // and two below it. 10.6's button fills the view (where AppKit's
+            // utility windows put theirs, too).
+            if (o[@"kCUIHorizontalAlignmentKey"]) {
+                NSString *type = o[@"windowtype"];
+                if ([type isEqualToString:@"regularwin"]) rect = CGRectOffset(rect, 1, flipped ? 1 : -1);
+                else if ([type hasPrefix:@"utilwin"]) rect = CGRectOffset(rect, -1, flipped ? -2 : 2);
+            }
             SLDrawButton(name, rect, ctx, flipped);
             return noErr;
         }
