@@ -91,4 +91,5 @@ BOOL SLLionSkin(NSScroller *scroller);             // an app's own skin, made fo
 BOOL SLProKitScroller(NSScroller *scroller);       // ProKit's: it draws, with 10.6's geometry
 BOOL SLSkinHandled(NSScroller *scroller);          // ...one this plugin gives 10.6's ends (Reminders')
 void SLSkinnedPaintArrow(NSScroller *scroller, const SLState *st, NSScrollerArrow arrow, NSInteger highlightPart);
+NSRect SLSkinnedEndRect(const SLState *st, NSScrollerArrow arrow);   // an end and its fade: all SLSkinnedPaintArrow paints
 void SLSkinnedDrawKnob(NSScroller *scroller, const SLState *st);

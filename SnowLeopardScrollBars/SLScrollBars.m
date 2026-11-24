@@ -236,6 +236,9 @@ static void sl_drawRect(NSScroller *self, SEL _cmd, NSRect dirty)
 
     for (int i = 0; i < 4; i++) {
         NSRect rect = [self _drawingRectForPart:order[i]];
+        // Reminders' ends fade into the track next to them (SLSkinned.m).
+        if (SLSkinHandled(self) && (order[i] == NSScrollerDecrementLine || order[i] == NSScrollerIncrementLine))
+            rect = SLSkinnedEndRect(&st, order[i] == NSScrollerDecrementLine ? NSScrollerDecrementArrow : NSScrollerIncrementArrow);
         if (NSIsEmptyRect(rect) || NSIsEmptyRect(NSIntersectionRect(rect, dirty))) continue;
         switch (order[i]) {
             case NSScrollerKnobSlot:

@@ -301,6 +301,35 @@ void SLSkinnedDrawKnob(NSScroller *scroller, const SLState *st)
     NSDrawThreePartImage(rect, top, mid, bot, YES, NSCompositeSourceOver, 1, NO);
 }
 
+// The stretch of track next to an end, where the app's track gives way to
+// Snow Leopard's; empty if there's no room. from/edge: where the fade starts
+// (transparent) and ends (opaque, at the end's art).
+static NSRect SLSkinFadeRect(const SLState *st, NSScrollerArrow arrow, CGFloat *from, CGFloat *edge)
+{
+    NSRect end = SLDrawingRect(st, arrow == NSScrollerDecrementArrow ? NSScrollerDecrementLine : NSScrollerIncrementLine);
+    if (NSIsEmptyRect(end)) return NSZeroRect;
+    BOOL nearEnd = (arrow == NSScrollerDecrementArrow);
+    NSRect slot = SLDrawingRect(st, NSScrollerKnobSlot);
+    CGFloat slotMin = st->horizontal ? NSMinX(slot) : NSMinY(slot), slotMax = st->horizontal ? NSMaxX(slot) : NSMaxY(slot);
+    *edge = nearEnd ? (st->horizontal ? NSMaxX(end) : NSMaxY(end)) : (st->horizontal ? NSMinX(end) : NSMinY(end));
+    *from = nearEnd ? MIN(*edge + kSLSkinFade, slotMax) : MAX(*edge - kSLSkinFade, slotMin);
+    CGFloat lo = MIN(*from, *edge), hi = MAX(*from, *edge);
+    if (hi - lo < 1) return NSZeroRect;
+    return st->horizontal ? NSMakeRect(lo, NSMinY(slot), hi - lo, NSHeight(slot)) : NSMakeRect(NSMinX(slot), lo, NSWidth(slot), hi - lo);
+}
+
+// An end and its fade: what SLSkinnedPaintArrow paints, so what must be
+// repainted with it. (Redrawing the track next to an end - the thumb dragged
+// over it - paints over the fade, so it redraws the end too.)
+NSRect SLSkinnedEndRect(const SLState *st, NSScrollerArrow arrow)
+{
+    NSRect end = SLDrawingRect(st, arrow == NSScrollerDecrementArrow ? NSScrollerDecrementLine : NSScrollerIncrementLine);
+    if (NSIsEmptyRect(end)) return NSZeroRect;
+    CGFloat from, edge;
+    NSRect fade = SLSkinFadeRect(st, arrow, &from, &edge);
+    return NSIsEmptyRect(fade) ? end : NSUnionRect(end, fade);
+}
+
 // Stands in for -[NSScroller drawArrow:highlightPart:] (SLPaintArrow): one end
 // of the scroll bar.
 void SLSkinnedPaintArrow(NSScroller *scroller, const SLState *st, NSScrollerArrow arrow, NSInteger highlightPart)
@@ -308,18 +337,13 @@ void SLSkinnedPaintArrow(NSScroller *scroller, const SLState *st, NSScrollerArro
     NSRect end = SLDrawingRect(st, arrow == NSScrollerDecrementArrow ? NSScrollerDecrementLine : NSScrollerIncrementLine);
     if (NSIsEmptyRect(end)) return;
     CGContextRef ctx = (CGContextRef)[[NSGraphicsContext currentContext] graphicsPort];
-    BOOL nearEnd = (arrow == NSScrollerDecrementArrow);
 
-    // The stretch of track next to this end, where the app's track gives way
-    // to Snow Leopard's: Snow Leopard's track drawn over it, from transparent
-    // on the far side to opaque where the end's art begins.
+    // The stretch of track next to this end: Snow Leopard's track drawn over
+    // it, from transparent on the far side to opaque where the end's art begins.
     NSRect slot = SLDrawingRect(st, NSScrollerKnobSlot);
-    CGFloat slotMin = st->horizontal ? NSMinX(slot) : NSMinY(slot), slotMax = st->horizontal ? NSMaxX(slot) : NSMaxY(slot);
-    CGFloat edge = nearEnd ? (st->horizontal ? NSMaxX(end) : NSMaxY(end)) : (st->horizontal ? NSMinX(end) : NSMinY(end));
-    CGFloat from = nearEnd ? MIN(edge + kSLSkinFade, slotMax) : MAX(edge - kSLSkinFade, slotMin);
-    CGFloat lo = MIN(from, edge), hi = MAX(from, edge);
-    if (hi - lo >= 1) {
-        NSRect fade = st->horizontal ? NSMakeRect(lo, NSMinY(slot), hi - lo, NSHeight(slot)) : NSMakeRect(NSMinX(slot), lo, NSWidth(slot), hi - lo);
+    CGFloat from, edge;
+    NSRect fade = SLSkinFadeRect(st, arrow, &from, &edge);
+    if (!NSIsEmptyRect(fade)) {
         CGContextSaveGState(ctx);
         CGContextClipToRect(ctx, NSRectToCGRect(fade));
         CGContextBeginTransparencyLayerWithRect(ctx, NSRectToCGRect(fade), NULL);
