@@ -74,9 +74,38 @@ static ptrdiff_t gSFlags2Offset = 0;     // NSScroller._sFlags2
 #define kSFlags2MaxEndHit   0x0040      // DoubleBoth: the pressed arrow is in the max-end pair
 
 // Apps can give a window or view an NSAppearance of their own, drawn from a
-// CoreUI catalog of their own (Reminders' leather, for one); scrollers there
-// are part of the app's look and are left to it, as SnowLeopardWindows leaves
-// such windows' chrome.
+// CoreUI catalog of their own; scrollers there that the catalog draws are part
+// of the app's look and are left to it, as SnowLeopardWindows leaves such
+// windows' chrome - as are AppKit's own other looks (LightContent). But an
+// app's catalog often has nothing for scroll bars (Mail's message pane,
+// "ViewingPaneView", only restyles text): its scrollers are Mavericks' own,
+// and get 10.6's like any other.
+static const void *kSLAppearanceDrawsScrollers = &kSLAppearanceDrawsScrollers;
+
+// Whether a catalog has scroll bar art: renditions of the elements CoreUI
+// draws scroll bars from (CUICoreThemeRenderer::DrawScrollBar: 18, 91, 30).
+// AppKit's own appearances come from CoreUI's system catalog, which can't be
+// listed; they are other looks of AppKit's, and count as drawing them.
+static BOOL SLAppearanceDrawsScrollers(id appearance)
+{
+    NSNumber *cached = objc_getAssociatedObject(appearance, kSLAppearanceDrawsScrollers);
+    if (cached) return [cached boolValue];
+    BOOL draws = YES;
+    SEL catalogSel = sel_registerName("_coreUICatalog"), storeSel = sel_registerName("_themeStore"), storageSel = sel_registerName("themeStore");
+    id catalog = [appearance respondsToSelector:catalogSel] ? ((id (*)(id, SEL))objc_msgSend)(appearance, catalogSel) : nil;
+    id store = [catalog respondsToSelector:storeSel] ? ((id (*)(id, SEL))objc_msgSend)(catalog, storeSel) : nil;
+    id storage = [store respondsToSelector:storageSel] ? ((id (*)(id, SEL))objc_msgSend)(store, storageSel) : nil;
+    if ([storage respondsToSelector:@selector(allAssetKeys)]) {
+        draws = NO;
+        for (id key in ((NSArray *(*)(id, SEL))objc_msgSend)(storage, @selector(allAssetKeys))) {
+            long element = [key respondsToSelector:@selector(themeElement)] ? ((long (*)(id, SEL))objc_msgSend)(key, @selector(themeElement)) : -1;
+            if (element == 18 || element == 91 || element == 30) { draws = YES; break; }
+        }
+    }
+    objc_setAssociatedObject(appearance, kSLAppearanceDrawsScrollers, @(draws), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return draws;
+}
+
 static BOOL SLHasCustomAppearance(NSView *view)
 {
     static SEL isDefault;
@@ -88,12 +117,10 @@ static BOOL SLHasCustomAppearance(NSView *view)
                  && [NSClassFromString(@"NSAppearance") instancesRespondToSelector:isDefault];
     });
     if (!available) return NO;
-    for (NSView *v = view; v; v = [v superview]) {
-        id appearance = [v appearance];
-        if (appearance) return !((BOOL (*)(id, SEL))objc_msgSend)(appearance, isDefault);
-    }
-    id appearance = [[view window] appearance];
-    return appearance && !((BOOL (*)(id, SEL))objc_msgSend)(appearance, isDefault);
+    id appearance = nil;
+    for (NSView *v = view; v && !appearance; v = [v superview]) appearance = [v appearance];
+    if (!appearance) appearance = [[view window] appearance];
+    return appearance && !((BOOL (*)(id, SEL))objc_msgSend)(appearance, isDefault) && SLAppearanceDrawsScrollers(appearance);
 }
 
 // Whether this scroller gets 10.6's scroll bars: legacy style, and not part of
