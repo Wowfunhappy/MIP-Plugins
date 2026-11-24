@@ -12,17 +12,17 @@
 //  CoreUI instead: Mavericks' arrowless legacy scroll bar.
 //
 //  With 10.6's scroll bars, _HIThemeUseCoreUI() answers no inside HIToolbox's
-//  theme functions for a scroll bar track - hit-testing, bounds, part
-//  bounds, thumb position and shape, live value, drag rectangle - so a
-//  scroll bar's layout and behaviour take HIToolbox's 10.6 path together,
-//  and nothing else (sliders, progress bars, buttons) changes. With overlay
-//  scroll bars, or the plugin off, HIToolbox is left as it is.
+//  theme functions for a scroll bar track - drawing, hit-testing, bounds,
+//  part bounds, thumb position and shape, live value, drag rectangle - so
+//  all of a scroll bar takes HIToolbox's 10.6 path together, and nothing
+//  else (sliders, progress bars, buttons) changes. With overlay scroll bars,
+//  or the plugin off, HIToolbox is left as it is.
 //
-//  Drawing is the plugin's own (SLPaintAll), as for an NSScroller, from the
-//  track HIToolbox describes: HIToolbox's 10.6 drawing stretches and tiles
-//  1x bitmaps, which on a Retina display shows seams through the track and
-//  thumb and soft arrows. 10.6's layout is the plugin's (the thumb, arrows
-//  and track land on the same pixels), so what is drawn is what is hit.
+//  HIToolbox's 10.6 drawing is made for 1x: it stretches and tiles 1x
+//  bitmaps, and drawn straight into a Retina display's 2x context they
+//  interpolate into seams down the track and through the thumb. There it
+//  draws into a 1x bitmap instead, shown with its pixels doubled, as a 10.6
+//  app's scroll bars were on a Retina display.
 //
 
 #import "SLScrollBars.h"
@@ -47,54 +47,6 @@ static Boolean sl_useCoreUI(void)
 {
     if (gScrollBarDepth > 0 && SLCarbonSnowLeopard()) return false;
     return orig_useCoreUI();
-}
-
-// The plugin's state for the scroll bar a track describes, in flipped (y
-// down) coordinates, as an NSScroller's.
-static SLState SLStateForTrack(const HIThemeTrackDrawInfo *info)
-{
-    SLState st;
-    memset(&st, 0, sizeof(st));
-    st.bounds = NSRectFromCGRect(info->bounds);
-    st.horizontal = (info->attributes & kThemeTrackHorizontal) != 0;
-    st.small = (info->kind != kThemeScrollBarMedium);
-    st.thickness = st.small ? 11 : 15;
-    st.flipped = YES;
-    st.config = (info->attributes & kThemeTrackNoScrollBarArrows) ? 0 : SLArrowConfig();
-    double range = (double)info->max - info->min;
-    st.enabled = info->enableState != kThemeTrackDisabled && range > 0;
-    st.value = range > 0 ? MIN(1, MAX(0, (info->value - info->min) / range)) : 0;
-    double view = info->trackInfo.scrollbar.viewsize;
-    st.proportion = (range > 0 && view > 0) ? view / (range + view) : 1;
-    st.active = st.arrowsActive = (info->enableState == kThemeTrackActive);
-    st.tint = st.active ? [NSColor currentControlTint] : NSClearControlTint;
-
-    // An arrow pressed: the outer one at the minimum end, or the inner one at
-    // the maximum end, scrolls back; the others forward.
-    UInt8 press = info->trackInfo.scrollbar.pressState;
-    st.pressedArrow = -1;
-    if (press & (kThemeLeftOutsideArrowPressed | kThemeRightInsideArrowPressed)) st.pressedArrow = NSScrollerDecrementArrow;
-    else if (press & (kThemeRightOutsideArrowPressed | kThemeLeftInsideArrowPressed)) st.pressedArrow = NSScrollerIncrementArrow;
-    st.pressedInMaxEnd = (press & (kThemeRightInsideArrowPressed | kThemeRightOutsideArrowPressed)) != 0;
-    return st;
-}
-
-// HIToolbox draws its scroll bars in unflipped (y up) coordinates, having
-// unflipped the views' flipped contexts; the track is drawn here in flipped
-// ones, with the same bounds.
-static void SLPaintTrack(const HIThemeTrackDrawInfo *info, CGContextRef ctx)
-{
-    SLState st = SLStateForTrack(info);
-    CGContextSaveGState(ctx);
-    if (CGContextGetCTM(ctx).d > 0) {
-        CGContextTranslateCTM(ctx, 0, 2 * CGRectGetMinY(info->bounds) + CGRectGetHeight(info->bounds));
-        CGContextScaleCTM(ctx, 1, -1);
-    }
-    [NSGraphicsContext saveGraphicsState];
-    [NSGraphicsContext setCurrentContext:[NSGraphicsContext graphicsContextWithGraphicsPort:ctx flipped:YES]];
-    SLPaintAll(&st);
-    [NSGraphicsContext restoreGraphicsState];
-    CGContextRestoreGState(ctx);
 }
 
 static inline BOOL SLIsScrollBarKind(const HIThemeTrackDrawInfo *info)
@@ -155,13 +107,47 @@ static OSStatus sl_scrollBarTrackRect(const HIRect *bounds, const HIScrollBarTra
 
 // HIToolbox's own internal scroll bar functions (HIScrollBar calls some of them directly).
 static OSStatus (*orig_drawScrollBar)(const HIThemeTrackDrawInfo *, const CGRect *, void *, void *, CGContextRef);
+// In a context scaled above 1x (a Retina display's), into a 1x bitmap of the
+// track's bounds, then into the context with each pixel doubled. HIToolbox
+// draws its scroll bars in unflipped (y up) coordinates, having unflipped the
+// views' contexts; the bitmap is the same.
+static OSStatus SLDrawScrollBarAt1x(const HIThemeTrackDrawInfo *info, const CGRect *ghost, void *erase, void *refcon, CGContextRef ctx)
+{
+    CGRect bounds = CGRectIntegral(info->bounds);
+    size_t width = (size_t)bounds.size.width, height = (size_t)bounds.size.height;
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    CGContextRef bitmap = (width && height)
+        ? CGBitmapContextCreate(NULL, width, height, 8, 0, space, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Host) : NULL;
+    CGColorSpaceRelease(space);
+    if (!bitmap) return orig_drawScrollBar(info, ghost, erase, refcon, ctx);
+    CGContextTranslateCTM(bitmap, -bounds.origin.x, -bounds.origin.y);
+    OSStatus result = orig_drawScrollBar(info, ghost, erase, refcon, bitmap);
+    CGImageRef image = CGBitmapContextCreateImage(bitmap);
+    CGContextRelease(bitmap);
+
+    CGContextSaveGState(ctx);
+    CGContextSetInterpolationQuality(ctx, kCGInterpolationNone);
+    if (CGContextGetCTM(ctx).d < 0) {           // a flipped context: draw the image upright
+        CGContextTranslateCTM(ctx, 0, 2 * CGRectGetMinY(bounds) + bounds.size.height);
+        CGContextScaleCTM(ctx, 1, -1);
+    }
+    CGContextDrawImage(ctx, bounds, image);
+    CGContextRestoreGState(ctx);
+    CGImageRelease(image);
+    return result;
+}
+
 static OSStatus sl_drawScrollBar(const HIThemeTrackDrawInfo *info, const CGRect *ghost, void *erase, void *refcon, CGContextRef ctx)
 {
-    if (info && ctx && SLCarbonSnowLeopard()) {
-        SLPaintTrack(info, ctx);
-        return noErr;
-    }
-    return orig_drawScrollBar(info, ghost, erase, refcon, ctx);
+    SL_IN(YES)
+    OSStatus r;
+    CGSize unit = ctx ? CGContextConvertSizeToDeviceSpace(ctx, CGSizeMake(1, 1)) : CGSizeMake(1, 1);
+    if (info && ctx && SLCarbonSnowLeopard() && MAX(fabs(unit.width), fabs(unit.height)) > 1.01)
+        r = SLDrawScrollBarAt1x(info, ghost, erase, refcon, ctx);
+    else
+        r = orig_drawScrollBar(info, ghost, erase, refcon, ctx);
+    SL_OUT
+    return r;
 }
 
 static Boolean (*orig_hitTestScrollBar)(const HIThemeTrackDrawInfo *, CGPoint, short *);
