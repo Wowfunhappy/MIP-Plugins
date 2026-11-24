@@ -57,6 +57,7 @@
 //
 
 #import <Cocoa/Cocoa.h>
+#import <Carbon/Carbon.h>
 #import <dlfcn.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -968,7 +969,14 @@ static OSStatus sl_CUIDraw(CFTypeRef renderer, CGRect rect, CGContextRef ctx, CF
     if ([widget hasPrefix:@"titlebar"]) {
         NSString *name = SLButtonImageName(o);
         if (name) {
-            SLDrawButton(name, rect, ctx, [o[@"is.flipped"] boolValue]);
+            BOOL flipped = [o[@"is.flipped"] boolValue];
+            // A Carbon window (HIToolbox, which aligns the art in the
+            // rectangle: kCUIHorizontalAlignmentKey) asks for a standard
+            // window's button a point left of and above its view, and clips
+            // to the view: 10.6's button fills the view.
+            if (o[@"kCUIHorizontalAlignmentKey"] && [o[@"windowtype"] isEqualToString:@"regularwin"])
+                rect = CGRectOffset(rect, 1, flipped ? 1 : -1);
+            SLDrawButton(name, rect, ctx, flipped);
             return noErr;
         }
     } else if ([widget isEqualToString:@"kCUIWidgetWindowFrame"]) {
@@ -987,6 +995,49 @@ static OSStatus sl_CUIDraw(CFTypeRef renderer, CGRect rect, CGContextRef ctx, CF
     return orig_CUIDraw(renderer, rect, ctx, options, result);
 }
 
+// ---- Carbon windows' buttons ---------------------------------------------------------------
+//
+// A Carbon window (HIToolbox) lays out its own title bar buttons
+// (HIWindowFrameView::GetWidgetFrame), at Mavericks' positions: 7, 27 and 47
+// points from the left. In standard windows 10.6 put them at 8, 29 and 50, as
+// AppKit's (SLHookLayout); utility windows' are the same in both. Each button
+// is placed after the one before it (its current frame), so each moves a
+// point further than that one. (Carbon windows exist only in 32-bit processes.)
+
+#if !__LP64__
+typedef void *(*SLFindSymbolFn)(const void *image, const char *name);
+typedef const void *(*SLGetImageFn)(const char *name);
+
+static uintptr_t (*orig_getWidgetFrame)(void *, void *, unsigned, CGRect *);
+static WindowRef (*SLHIViewGetWindowRef)(void *);       // HIView::GetWindowRef()
+
+static uintptr_t sl_getWidgetFrame(void *self, void *unused, unsigned part, CGRect *frame)
+{
+    uintptr_t result = orig_getWidgetFrame(self, unused, part, frame);
+    if (!frame || (part != 'clos' && part != 'coll' && part != 'zoom')) return result;
+    WindowRef window = SLHIViewGetWindowRef(self);
+    WindowClass windowClass;
+    if (!window || GetWindowClass(window, &windowClass) != noErr
+        || windowClass == kUtilityWindowClass || windowClass == kFloatingWindowClass) return result;
+    frame->origin.x += 1;
+    return result;
+}
+
+static void SLHookCarbonLayout(SLHookFunctionFn hook)
+{
+    SLFindSymbolFn find = (SLFindSymbolFn)dlsym(RTLD_DEFAULT, "MSFindSymbol");
+    SLGetImageFn image = (SLGetImageFn)dlsym(RTLD_DEFAULT, "MSGetImageByName");
+    const void *hitoolbox = image ? image("/System/Library/Frameworks/Carbon.framework/Versions/A/Frameworks/HIToolbox.framework/Versions/A/HIToolbox") : NULL;
+    if (!find || !hitoolbox) return;
+    void *getWidgetFrame = find(hitoolbox, "__ZN17HIWindowFrameView14GetWidgetFrameEPvmP6CGRect");
+    SLHIViewGetWindowRef = find(hitoolbox, "__ZN6HIView12GetWindowRefEv");
+    if (!getWidgetFrame || !SLHIViewGetWindowRef) return;
+    hook(getWidgetFrame, (void *)sl_getWidgetFrame, (void **)&orig_getWidgetFrame);
+}
+#else
+static void SLHookCarbonLayout(SLHookFunctionFn hook) {}
+#endif
+
 static id (*orig_appInit)(id, SEL);
 
 static void SLSetUp(void)
@@ -1004,6 +1055,7 @@ static void SLSetUp(void)
     SLHookAppearance();
     hook(cuiDraw, (void *)sl_CUIDraw, (void **)&orig_CUIDraw);
     SLHookLayout();
+    SLHookCarbonLayout(hook);
     SLHookTitle();
     SLHookTextured();
     SLHookTabArt();
