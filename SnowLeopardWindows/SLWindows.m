@@ -604,18 +604,39 @@ static id sl_inactiveTextured(id self, SEL _cmd)
 // (CUICreateOrUpdateLayer) instead of drawing; have the frames of standard and
 // textured titled windows draw, through CUIDraw, like any other view. (Menus
 // and other untitled windows keep their layers.)
+//
+// Only once the frame has its layer: before, AppKit asks the same question to
+// decide whether to give it one (-[NSView _doSetWantsLayerYES] layer-backs the
+// frame with the content view only if the frame wants -updateLayer). A frame
+// left without a layer has its toolbar drawn straight into the window, where
+// an item that draws with NSCompositeCopy (Numbers' Zoom pop-up) clears the
+// window around it to transparent, instead of only its own layer.
+//
+// Their toolbars too: a layer-backed toolbar using -updateLayer has its
+// baseline in a view of its own showing Mavericks' separator image
+// (-[NSToolbarView layout] adds it only then); drawing, it draws the baseline
+// through CUIDraw (kCUIWidgetToolbarBaselineSeparator), so in 10.6's tone.
+static BOOL SLWindowDrawsFrame(NSWindow *window)
+{
+    NSUInteger mask = [window styleMask];
+    return window && (mask & NSTitledWindowMask) && !(mask & NSHUDWindowMask) && ![window isKindOfClass:NSClassFromString(@"NSCarbonMenuWindow")];
+}
+
 static BOOL (*orig_frameWantsUpdateLayer)(id, SEL);
 
 static BOOL sl_frameWantsUpdateLayer(id self, SEL _cmd)
 {
-    NSWindow *window = [self window];
-    NSUInteger mask = [window styleMask];
-    if (window && (mask & NSTitledWindowMask) && !(mask & NSHUDWindowMask) && ![window isKindOfClass:NSClassFromString(@"NSCarbonMenuWindow")])
-        return NO;
+    if ([self layer] && SLWindowDrawsFrame([self window])) return NO;
     return orig_frameWantsUpdateLayer(self, _cmd);
 }
 
+static BOOL (*orig_toolbarWantsUpdateLayer)(id, SEL);
 
+static BOOL sl_toolbarWantsUpdateLayer(id self, SEL _cmd)
+{
+    if (SLWindowDrawsFrame([self window])) return NO;
+    return orig_toolbarWantsUpdateLayer(self, _cmd);
+}
 
 static void SLHookTextured(void)
 {
@@ -623,6 +644,12 @@ static void SLHookTextured(void)
     Method wants = themeFrame ? class_getInstanceMethod(themeFrame, @selector(wantsUpdateLayer)) : NULL;
     if (wants) orig_frameWantsUpdateLayer = (void *)class_replaceMethod(themeFrame, @selector(wantsUpdateLayer), (IMP)sl_frameWantsUpdateLayer, method_getTypeEncoding(wants));
     if (!orig_frameWantsUpdateLayer && wants) orig_frameWantsUpdateLayer = (void *)method_getImplementation(wants);
+    Class toolbarView = NSClassFromString(@"NSToolbarView");
+    Method toolbarWants = toolbarView ? class_getInstanceMethod(toolbarView, @selector(wantsUpdateLayer)) : NULL;
+    if (toolbarWants) {
+        orig_toolbarWantsUpdateLayer = (void *)method_getImplementation(toolbarWants);   // (inherited: NSView's)
+        class_replaceMethod(toolbarView, @selector(wantsUpdateLayer), (IMP)sl_toolbarWantsUpdateLayer, method_getTypeEncoding(toolbarWants));
+    }
 
     Class frame = NSClassFromString(@"NSThemeFrame");
     Method options = class_getInstanceMethod(frame, sel_registerName("_cuiOptionsForWindowType:topHeight:drawTopSeparator:bottomBarHeight:shouldSetScaleKey:"));
