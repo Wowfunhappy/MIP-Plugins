@@ -116,7 +116,7 @@ static NSTextField *SLLabelFor(NSMatrix *matrix)
 
 static NSString *SLText(NSString *key)
 {
-    return [[NSBundle bundleForClass:objc_getClass("SLScrollBars")] localizedStringForKey:key value:nil table:@"SLScrollArrows"];
+    return [SLPluginBundle() localizedStringForKey:key value:nil table:@"SLScrollArrows"];
 }
 
 static void (*orig_mainViewDidLoad)(id, SEL);

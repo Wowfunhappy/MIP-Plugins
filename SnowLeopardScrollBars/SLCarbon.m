@@ -1,6 +1,14 @@
 //
 //  SLCarbon.m
-//  Carbon scroll bars (HIToolbox's HIScrollBar; Fetch 5, for one) as on 10.6.
+//  Carbon scroll bars (HIToolbox's HIScrollBar; Fetch 5, for one) as on 10.6:
+//  SnowLeopardScrollBars' main executable.
+//
+//  The plugin is one bundle with two executables. This one, the bundle's main
+//  executable, uses no AppKit, so it can go into any app with HIToolbox -
+//  Carbon apps without AppKit included. Everything else, AppKit's scroll bars
+//  (and WebKit's, and System Preferences' setting), is in
+//  SnowLeopardScrollBars-AppKit (SLScrollBars.m and the rest), which it loads
+//  only into apps that have AppKit, when they do (some load it later).
 //
 //  HIToolbox still has its 10.6 scroll bars: it reads AppleScrollBarVariant
 //  (and follows AppleAquaScrollBarVariantChanged) for the arrow style, lays
@@ -11,12 +19,12 @@
 //  Retina displays), so scroll bars are drawn, laid out and hit-tested by
 //  CoreUI instead: Mavericks' arrowless legacy scroll bar.
 //
-//  With 10.6's scroll bars, _HIThemeUseCoreUI() answers no inside HIToolbox's
-//  theme functions for a scroll bar track - drawing, hit-testing, bounds,
-//  part bounds, thumb position and shape, live value, drag rectangle - so
-//  all of a scroll bar takes HIToolbox's 10.6 path together, and nothing
-//  else (sliders, progress bars, buttons) changes. With overlay scroll bars,
-//  or the plugin off, HIToolbox is left as it is.
+//  _HIThemeUseCoreUI() now answers no inside HIToolbox's theme functions for
+//  a scroll bar track - drawing, hit-testing, bounds, part bounds, thumb
+//  position and shape, live value, drag rectangle - so all of a scroll bar
+//  takes HIToolbox's 10.6 path together, and nothing else (sliders, progress
+//  bars, buttons) changes. Carbon has no overlay scroll bars - its scroll
+//  bars are legacy ones whatever "Show scroll bars" says - so they always do.
 //
 //  HIToolbox's 10.6 drawing is made for 1x: it stretches and tiles 1x
 //  bitmaps, and drawn straight into a Retina display's 2x context they
@@ -25,9 +33,10 @@
 //  app's scroll bars were on a Retina display.
 //
 
-#import "SLScrollBars.h"
+#import <Foundation/Foundation.h>
 #import <Carbon/Carbon.h>
 #import <dlfcn.h>
+#import <mach-o/dyld.h>
 
 typedef void (*SLHookFn)(void *symbol, void *replacement, void **original);
 typedef void *(*SLFindSymbolFn)(const void *image, const char *name);
@@ -36,16 +45,11 @@ typedef const void *(*SLGetImageFn)(const char *name);
 // How deep this thread is in HIToolbox's theme code for a scroll bar.
 static __thread int gScrollBarDepth;
 
-static BOOL SLCarbonSnowLeopard(void)
-{
-    return SLIsEnabled() && [NSScroller preferredScrollerStyle] == NSScrollerStyleLegacy;
-}
-
 static Boolean (*orig_useCoreUI)(void);
 
 static Boolean sl_useCoreUI(void)
 {
-    if (gScrollBarDepth > 0 && SLCarbonSnowLeopard()) return false;
+    if (gScrollBarDepth > 0) return false;
     return orig_useCoreUI();
 }
 
@@ -142,7 +146,7 @@ static OSStatus sl_drawScrollBar(const HIThemeTrackDrawInfo *info, const CGRect 
     SL_IN(YES)
     OSStatus r;
     CGSize unit = ctx ? CGContextConvertSizeToDeviceSpace(ctx, CGSizeMake(1, 1)) : CGSizeMake(1, 1);
-    if (info && ctx && SLCarbonSnowLeopard() && MAX(fabs(unit.width), fabs(unit.height)) > 1.01)
+    if (info && ctx && MAX(fabs(unit.width), fabs(unit.height)) > 1.01)
         r = SLDrawScrollBarAt1x(info, ghost, erase, refcon, ctx);
     else
         r = orig_drawScrollBar(info, ghost, erase, refcon, ctx);
@@ -162,7 +166,7 @@ static OSStatus (*orig_thumbRegion)(const HIThemeTrackDrawInfo *, RgnHandle);
 static OSStatus sl_thumbRegion(const HIThemeTrackDrawInfo *info, RgnHandle rgn)
 { SL_IN(SLIsScrollBarKind(info)) OSStatus r = orig_thumbRegion(info, rgn); SL_OUT return r; }
 
-void SLCarbonInstall(void)
+static void SLCarbonInstall(void)
 {
     SLHookFn hook = (SLHookFn)dlsym(RTLD_DEFAULT, "MSHookFunction");
     SLFindSymbolFn find = (SLFindSymbolFn)dlsym(RTLD_DEFAULT, "MSFindSymbol");
@@ -209,4 +213,55 @@ void SLCarbonInstall(void)
     hook(dragSB, sl_scrollBarDragBounds, (void **)&orig_scrollBarDragBounds);
     hook(thumbRgn, sl_thumbRegion, (void **)&orig_thumbRegion);
     hook(useCoreUI, sl_useCoreUI, (void **)&orig_useCoreUI);
+}
+
+// ---- setting up -----------------------------------------------------------------------
+
+static NSString *gBundlePath;           // the plugin bundle
+
+// SnowLeopardScrollBars-AppKit, once the process has AppKit; its entry point
+// takes the bundle's path.
+static void SLLoadAppKitPart(void)
+{
+    static BOOL loaded = NO;
+    if (loaded) return;
+    loaded = YES;
+    NSString *path = [gBundlePath stringByAppendingPathComponent:@"Contents/MacOS/SnowLeopardScrollBars-AppKit"];
+    void *image = dlopen([path fileSystemRepresentation], RTLD_NOW | RTLD_LOCAL);
+    void (*start)(const char *) = image ? (void (*)(const char *))dlsym(image, "SLScrollBarsAppKitStart") : NULL;
+    if (!start) {
+        NSLog(@"SnowLeopardScrollBars: couldn't load its AppKit part: %s", dlerror());
+        return;
+    }
+    start([gBundlePath fileSystemRepresentation]);
+}
+
+// AppKit loaded after the plugin (a Carbon app that loads it later).
+static void SLImageAdded(const struct mach_header *header, intptr_t slide)
+{
+    Dl_info info;
+    if (!dladdr(header, &info) || !info.dli_fname || !strstr(info.dli_fname, "/AppKit.framework/")) return;
+    dispatch_async(dispatch_get_main_queue(), ^{ SLLoadAppKitPart(); });
+}
+
+static BOOL SLAppKitIsLoaded(void)
+{
+    void *appKit = dlopen("/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit", RTLD_LAZY | RTLD_NOLOAD);
+    if (appKit) dlclose(appKit);
+    return appKit != NULL;
+}
+
+__attribute__((constructor)) static void SLScrollBarsStart(void)
+{
+    @autoreleasepool {
+        if (floor(kCFCoreFoundationVersionNumber) != 855) return;      // Mavericks only
+        Dl_info info;
+        if (!dladdr((void *)SLScrollBarsStart, &info) || !info.dli_fname) return;
+        // .../SnowLeopardScrollBars.bundle/Contents/MacOS/SnowLeopardScrollBars
+        gBundlePath = [[[[[NSString stringWithUTF8String:info.dli_fname] stringByDeletingLastPathComponent]
+                         stringByDeletingLastPathComponent] stringByDeletingLastPathComponent] retain];
+        SLCarbonInstall();
+        if (SLAppKitIsLoaded()) SLLoadAppKitPart();
+        else _dyld_register_func_for_add_image(SLImageAdded);
+    }
 }

@@ -19,6 +19,7 @@
 	<key>MIPBundleNames</key>
 	<array>
 		<string>com.apple.AppKit</string>
+		<string>com.apple.HIToolbox</string>
 	</array>
 	<key>SIMBLTargetApplications</key>
 	<array>
