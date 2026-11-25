@@ -11,7 +11,9 @@
 //  never drawn by 10.6. Snow Leopard's layout doesn't suit it - Fission's
 //  CUScroller (CustomUI.framework) got 10.6's light end caps over its dark
 //  track - so these are left exactly as the app draws them. Skinned scrollers
-//  that could run on 10.6 get 10.6's treatment, as they did there. (Safari's
+//  that could run on 10.6 get 10.6's treatment, as they did there, and so does
+//  any skin that draws its own arrows (-drawArrow:highlightPart:), whatever
+//  else it says: those arrows are its 10.6 look. (Safari's
 //  sidebar, SidebarScroller, is one left alone.) The exception is Reminders'
 //  (RemindersLegacyScroller: a paper track, or leather in its sidebar, with a
 //  slim black pill). Reminders themes itself (an NSAppearance of its own,
@@ -205,9 +207,12 @@ BOOL SLLionSkin(NSScroller *scroller)
 
     // Made for Lion's scroll bars: it overrides one of Lion's class methods,
     // or it can't run before Lion anyway (its binary requires 10.7 or later).
+    // But one with arrow art of its own (-drawArrow:highlightPart:, which
+    // Lion's arrowless scroll bars never call) has a 10.6 look, so gets 10.6's.
     const char *image = class_getImageName(cls);
     BOOL skinned = !(image && strstr(image, "/AppKit.framework/"))
         && SLOverrides(cls, [NSScroller class], @selector(drawKnobSlotInRect:highlight:), NO)
+        && !SLOverrides(cls, [NSScroller class], @selector(drawArrow:highlightPart:), NO)
         && (SLOverrides(cls, [NSScroller class], @selector(isCompatibleWithOverlayScrollers), YES)
             || SLOverrides(cls, [NSScroller class], @selector(preferredScrollerStyle), YES)
             || SLImageMinimumOS(image) >= 0x000A0700);
