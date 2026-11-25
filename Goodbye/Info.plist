@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>Goodbye</string>
+	<key>CFBundleIdentifier</key>
+	<string>Wowfunhappy.Goodbye</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Goodbye</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>MIPBundleNames</key>
+	<array>
+		<string>com.apple.AppKit</string>
+	</array>
+	<key>MIPExcludedBundleNames</key>
+	<array>
+		<string>com.apple.mail</string>
+		<string>com.apple.iCal</string>
+		<string>org.m0k.transmission</string>
+		<string>com.viscosityvpn.Viscosity</string>
+		<string>com.apple.ScreenSharing</string>
+		<string>org.mozilla.firefox</string>
+		<string>org.mozilla.momiji</string>
+	</array>
+	<key>MIPSupportsGC</key>
+	<true/>
+</dict>
+</plist>
