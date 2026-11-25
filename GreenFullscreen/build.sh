@@ -11,6 +11,8 @@ BUNDLE="build/$NAME.bundle"
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/Contents/MacOS"
 cp Info.plist "$BUNDLE/Contents/Info.plist"
+mkdir -p "$BUNDLE/Contents/Resources"
+cp Resources/*.png "$BUNDLE/Contents/Resources/"     # Yosemite's full-screen arrows (GreenFullscreen.m)
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(date +%Y.%m.%d)" "$BUNDLE/Contents/Info.plist" > /dev/null
 chmod 644 "$BUNDLE/Contents/Info.plist"
 
@@ -19,7 +21,7 @@ chmod 644 "$BUNDLE/Contents/Info.plist"
 CLANG=$(../tools/gc-clang.sh)
 "$CLANG" -bundle -arch i386 -arch x86_64 -mmacosx-version-min=10.9 -isysroot "$(xcrun --show-sdk-path)" \
     -fobjc-gc -Os -Wall -Wno-deprecated-declarations -fno-objc-arc -I../ZKSwizzle \
-    -framework Cocoa \
+    -framework Cocoa -framework ApplicationServices \
     -o "$BUNDLE/Contents/MacOS/$NAME" \
     GreenFullscreen.m ../ZKSwizzle/ZKSwizzle.m
 
