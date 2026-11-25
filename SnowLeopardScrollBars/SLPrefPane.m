@@ -13,6 +13,11 @@
 //  notification, which every app with this plugin follows at once
 //  (+[SLScrollBars arrowVariantChanged:]).
 //
+//  With overlay scroll bars, which have no arrows, it is disabled: whenever
+//  AppKit's preferred scroller style is overlay ("Show scroll bars: When
+//  scrolling", or "Automatically" where that gives overlay ones), followed
+//  as it changes (NSPreferredScrollerStyleDidChangeNotification).
+//
 //  The control is a copy of the pane's own "Show scroll bars:" matrix and
 //  label (so it has their font, size and style), retitled with 10.6's own
 //  text in each of 10.6's languages (SLScrollArrows.strings, from 10.6's
@@ -26,7 +31,9 @@ static NSString *const kSLVariantKey = @"AppleScrollBarVariant";
 static NSString *const kSLVariantChanged = @"AppleAquaScrollBarVariantChanged";
 
 @interface SLArrowsPrefControl : NSObject {
-    NSMatrix *_matrix;          // in the pane's view, which keeps it
+    NSMatrix *_matrix;          // in the pane's view, which keeps them
+    NSTextField *_label;
+    NSColor *_labelColor;
 }
 @end
 
@@ -43,17 +50,38 @@ static NSInteger SLScrollArrowVariant(void)
     return 1;
 }
 
-- (id)initWithMatrix:(NSMatrix *)matrix
+- (id)initWithMatrix:(NSMatrix *)matrix label:(NSTextField *)label
 {
     if ((self = [super init])) {
         _matrix = matrix;
+        _label = label;
+        _labelColor = [[label textColor] retain];
         [_matrix setTarget:self];
         [_matrix setAction:@selector(placeScrollArrowsChanged:)];
         [self update:nil];
+        [self styleChanged:nil];
         [[NSDistributedNotificationCenter defaultCenter] addObserver:self selector:@selector(update:)
                                                                 name:kSLVariantChanged object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(styleChanged:)
+                                                     name:NSPreferredScrollerStyleDidChangeNotification object:nil];
     }
     return self;
+}
+
+- (void)dealloc
+{
+    [[NSDistributedNotificationCenter defaultCenter] removeObserver:self];
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [_labelColor release];
+    [super dealloc];
+}
+
+// Overlay scroll bars have no arrows to place.
+- (void)styleChanged:(NSNotification *)note
+{
+    BOOL arrows = [NSScroller preferredScrollerStyle] == NSScrollerStyleLegacy;
+    [_matrix setEnabled:arrows];
+    [_label setTextColor:arrows ? _labelColor : [NSColor disabledControlTextColor]];
 }
 
 - (void)update:(NSNotification *)note
@@ -229,7 +257,7 @@ static void sl_mainViewDidLoad(id self, SEL _cmd)
     [matrix accessibilitySetOverrideValue:label forAttribute:NSAccessibilityTitleUIElementAttribute];
 
     // Kept for the pane's lifetime (the pane object keeps its view).
-    objc_setAssociatedObject(self, &orig_mainViewDidLoad, [[[SLArrowsPrefControl alloc] initWithMatrix:matrix] autorelease],
+    objc_setAssociatedObject(self, &orig_mainViewDidLoad, [[[SLArrowsPrefControl alloc] initWithMatrix:matrix label:label] autorelease],
                              OBJC_ASSOCIATION_RETAIN);
 }
 
