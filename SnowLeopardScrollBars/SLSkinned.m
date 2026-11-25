@@ -5,11 +5,14 @@
 //
 //  Some apps subclass NSScroller to draw their own track and thumb
 //  (-drawKnobSlotInRect:highlight:, -drawKnob) for Lion's legacy scroll bars,
-//  which have no arrows, and say so by overriding +isCompatibleWithOverlayScrollers
-//  (Lion's API). Snow Leopard's layout doesn't suit such a skin, so these are
-//  left exactly as the app draws them (pre-Lion skinned scrollers, which don't
-//  override that, get 10.6's treatment as they did on 10.6; Safari's sidebar,
-//  SidebarScroller, is one left alone) - except Reminders'
+//  which have no arrows. Such a skin is known by overriding one of Lion's
+//  class methods (+isCompatibleWithOverlayScrollers, +preferredScrollerStyle),
+//  or by being in a binary that requires 10.7 or later: either way it was
+//  never drawn by 10.6. Snow Leopard's layout doesn't suit it - Fission's
+//  CUScroller (CustomUI.framework) got 10.6's light end caps over its dark
+//  track - so these are left exactly as the app draws them. Skinned scrollers
+//  that could run on 10.6 get 10.6's treatment, as they did there. (Safari's
+//  sidebar, SidebarScroller, is one left alone.) The exception is Reminders'
 //  (RemindersLegacyScroller: a paper track, or leather in its sidebar, with a
 //  slim black pill). Reminders themes itself (an NSAppearance of its own,
 //  RemindersLeather.car), which would also leave it alone (SLScrollBars.m).
@@ -170,6 +173,24 @@ static BOOL SLOverrides(Class cls, Class base, SEL sel, BOOL classMethod)
     return mine && theirs && method_getImplementation(mine) != method_getImplementation(theirs);
 }
 
+// The minimum OS X version (as 0xXXXXYYZZ, LC_VERSION_MIN_MACOSX) of the
+// loaded image at this path, or 0 if it says none (older than 10.6 SDKs).
+static uint32_t SLImageMinimumOS(const char *path)
+{
+    if (!path) return 0;
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (!name || strcmp(name, path) != 0) continue;
+        const struct mach_header *header = _dyld_get_image_header(i);
+        BOOL is64 = header->magic == MH_MAGIC_64;
+        const struct load_command *lc = (const struct load_command *)((const char *)header + (is64 ? sizeof(struct mach_header_64) : sizeof(struct mach_header)));
+        for (uint32_t j = 0; j < header->ncmds; j++, lc = (const struct load_command *)((const char *)lc + lc->cmdsize))
+            if (lc->cmd == LC_VERSION_MIN_MACOSX) return ((const struct version_min_command *)lc)->version;
+        return 0;
+    }
+    return 0;
+}
+
 BOOL SLLionSkin(NSScroller *scroller)
 {
     static CFMutableDictionaryRef verdicts;         // class -> kCFBooleanTrue / False
@@ -182,10 +203,14 @@ BOOL SLLionSkin(NSScroller *scroller)
     OSSpinLockUnlock(&lock);
     if (verdict) return verdict == kCFBooleanTrue;
 
+    // Made for Lion's scroll bars: it overrides one of Lion's class methods,
+    // or it can't run before Lion anyway (its binary requires 10.7 or later).
     const char *image = class_getImageName(cls);
     BOOL skinned = !(image && strstr(image, "/AppKit.framework/"))
         && SLOverrides(cls, [NSScroller class], @selector(drawKnobSlotInRect:highlight:), NO)
-        && SLOverrides(cls, [NSScroller class], @selector(isCompatibleWithOverlayScrollers), YES);
+        && (SLOverrides(cls, [NSScroller class], @selector(isCompatibleWithOverlayScrollers), YES)
+            || SLOverrides(cls, [NSScroller class], @selector(preferredScrollerStyle), YES)
+            || SLImageMinimumOS(image) >= 0x000A0700);
     OSSpinLockLock(&lock);
     CFDictionarySetValue(verdicts, cls, skinned ? kCFBooleanTrue : kCFBooleanFalse);
     OSSpinLockUnlock(&lock);
