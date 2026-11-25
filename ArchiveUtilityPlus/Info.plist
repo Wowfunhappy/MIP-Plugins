@@ -19,7 +19,6 @@
 	<key>MIPBundleNames</key>
 	<array>
 		<string>com.apple.archiveutility</string>
-		<string>com.apple.finder</string>
 	</array>
 </dict>
 </plist>

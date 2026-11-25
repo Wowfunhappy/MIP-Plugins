@@ -23,9 +23,10 @@
 //  is gone, and the installed one stays inactive. So the installed copy is
 //  registered, and any other copy of it (same name or identifier) that holds
 //  one of its types is unregistered, which makes the installed one active.
-//  Other apps declaring these types are left alone. This is done in Finder
-//  (MIP loads the bundle there too, for this alone), so it happens at every
-//  login, and in Archive Utility.
+//  Other apps declaring these types are left alone. This is done whenever
+//  Archive Utility launches. (Nothing finds the installed copy otherwise:
+//  Spotlight doesn't index /usr/share/mip. So after installing, the icons
+//  appear once Archive Utility has run.)
 //
 //  MIP loads this while the app is checking in with LaunchServices, so
 //  everything that calls LaunchServices waits until the app has finished
@@ -336,18 +337,15 @@ static void ArchiveUtilityPlusRegisterIcons(void)
 
 + (void)appDidFinishLaunching:(NSNotification *)note
 {
-    BOOL archiveUtility = [[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.archiveutility"];
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
         ArchiveUtilityPlusRegisterIcons();
-        if (archiveUtility) ArchiveUtilityPlusSetDefaultHandler();
+        ArchiveUtilityPlusSetDefaultHandler();
     });
 }
 
 + (void)load
 {
-    if ([[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.archiveutility"]) {
-        ZKSwizzle(ArchiveUtilityPlus_BAHController, BAHController);
-    }
+    ZKSwizzle(ArchiveUtilityPlus_BAHController, BAHController);
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appDidFinishLaunching:)
                                                  name:NSApplicationDidFinishLaunchingNotification object:nil];
 }

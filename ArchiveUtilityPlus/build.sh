@@ -1,8 +1,8 @@
 #!/bin/bash
-# Builds build/ArchiveUtilityPlus.bundle (x86_64: Archive Utility and Finder are
-# 64-bit only, and don't use garbage collection).
-# To install, copy the bundle into /usr/share/mip/Bundles/ and relaunch Finder
-# and Archive Utility.
+# Builds build/ArchiveUtilityPlus.bundle (x86_64: Archive Utility is 64-bit
+# only, and doesn't use garbage collection).
+# To install, copy the bundle into /usr/share/mip/Bundles/; the icons appear once
+# Archive Utility has run.
 set -e
 cd "$(dirname "$0")"
 
