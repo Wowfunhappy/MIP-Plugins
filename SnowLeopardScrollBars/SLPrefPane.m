@@ -1,7 +1,8 @@
 //
 //  SLPrefPane.m
 //  10.6's "Place scroll arrows:" setting, back in System Preferences' General
-//  pane (Appearance.prefPane, class LookPref), above "Show scroll bars:".
+//  pane (Appearance.prefPane, class LookPref), below "Show scroll bars:" (on
+//  which it depends) and above "Click in the scroll bar to:".
 //
 //  It works as 10.6's did (-[AppearanceShared scrollArrowVariant] and
 //  -setScrollArrowVariant:, from its LookPref): AppleScrollBarVariant in the
@@ -21,8 +22,8 @@
 //  The control is a copy of the pane's own "Show scroll bars:" matrix and
 //  label (so it has their font, size and style), retitled with 10.6's own
 //  text in each of 10.6's languages (SLScrollArrows.strings, from 10.6's
-//  LookPref.nib: extract.sh). The pane grows to make room: everything above
-//  "Show scroll bars:" moves up.
+//  LookPref.nib: extract.sh). The pane grows to make room: "Click in the scroll
+//  bar to:" and everything below it move down.
 //
 
 #import "SLScrollBars.h"
@@ -156,8 +157,8 @@ static void sl_mainViewDidLoad(id self, SEL _cmd)
     NSMatrix *show = SLIvar(self, "showScrollBarsMatrix");
     NSMatrix *click = SLIvar(self, "clickScrollbarMatrix");
     NSView *pane = [show superview];
-    NSTextField *showLabel = SLLabelFor(show);
-    if (![show isKindOfClass:[NSMatrix class]] || ![click isKindOfClass:[NSMatrix class]] || !showLabel || [show numberOfRows] < 2) return;
+    NSTextField *showLabel = SLLabelFor(show), *clickLabel = SLLabelFor(click);
+    if (![show isKindOfClass:[NSMatrix class]] || ![click isKindOfClass:[NSMatrix class]] || !showLabel || !clickLabel || [show numberOfRows] < 2) return;
 
     // A matrix like "Show scroll bars:", two rows, with 10.6's buttons in 10.6's order.
     NSMatrix *matrix = SLCopyView(show);
@@ -181,14 +182,14 @@ static void sl_mainViewDidLoad(id self, SEL _cmd)
     [label setPreferredMaxLayoutWidth:column];
 
     // The pane is laid out with constraints, measured from the top down, and
-    // each language's nib ties "Show scroll bars:" to what's above it in its
-    // own way. So: every vertical constraint between something above the top
-    // of "Show scroll bars:" (its label or matrix, whichever is higher; the
-    // pane's top counts as above) and something at or below it is lengthened
-    // by the new pair's height, opening a gap of exactly that much there, and
-    // the pair is placed in the gap relative to "Show scroll bars:" alone,
-    // spaced from it as "Click in the scroll bar to:" is. The pane grows by
-    // as much. (Its view isn't in the window yet: System Preferences sizes the
+    // each language's nib ties "Click in the scroll bar to:" to what's above
+    // it in its own way. So: every vertical constraint between something above
+    // the top of "Click in the scroll bar to:" (its label or matrix, whichever
+    // is higher; the pane's top counts as above) and something at or below it
+    // is lengthened by the new pair's height, opening a gap of exactly that
+    // much there, and the pair is placed in the gap below "Show scroll bars:",
+    // spaced from it as "Click in the scroll bar to:" is. The pane grows by as
+    // much. (Its view isn't in the window yet: System Preferences sizes the
     // window to it afterwards.)
     if (pane != ((NSView *(*)(id, SEL))objc_msgSend)(self, sel_registerName("mainView"))) return;     // (NSPreferencePane)
     CGFloat gap = NSMinY([show frame]) - NSMaxY([click frame]);
@@ -199,7 +200,8 @@ static void sl_mainViewDidLoad(id self, SEL _cmd)
     // the first row): its frame may be taller than its text (German's).
     CGFloat textHeight = [[showLabel cell] cellSizeForBounds:NSMakeRect(0, 0, NSWidth([showLabel frame]), CGFLOAT_MAX)].height;
     CGFloat labelBottom = labelTop + MIN(textHeight, NSHeight([showLabel frame]));
-    CGFloat line = MIN(showTop, labelTop) - 0.5;
+    CGFloat clickTop = paneTop - NSMaxY([click frame]), clickLabelTop = paneTop - NSMaxY([clickLabel frame]);
+    CGFloat line = MIN(clickTop, clickLabelTop) - 0.5;
     BOOL (^below)(id, NSLayoutAttribute, BOOL *) = ^BOOL(id item, NSLayoutAttribute attribute, BOOL *known) {
         *known = YES;
         if (item == pane) {
@@ -232,8 +234,8 @@ static void sl_mainViewDidLoad(id self, SEL _cmd)
     [pane addSubview:label];
     [pane addSubview:matrix];
     NSArray *added = @[
-        [NSLayoutConstraint constraintWithItem:show attribute:NSLayoutAttributeTop relatedBy:NSLayoutRelationEqual
-                                        toItem:matrix attribute:NSLayoutAttributeBottom multiplier:1 constant:gap],
+        [NSLayoutConstraint constraintWithItem:matrix attribute:NSLayoutAttributeTop relatedBy:NSLayoutRelationEqual
+                                        toItem:show attribute:NSLayoutAttributeBottom multiplier:1 constant:gap],
         // (Its last line beside the first row, as the "Show scroll bars:" label's is;
         // the copy's frame is its text's size.)
         [NSLayoutConstraint constraintWithItem:label attribute:NSLayoutAttributeBottom relatedBy:NSLayoutRelationEqual
@@ -250,10 +252,9 @@ static void sl_mainViewDidLoad(id self, SEL _cmd)
     [pane addConstraints:added];
     [pane setFrameSize:NSMakeSize(NSWidth([pane frame]), NSHeight([pane frame]) + rise)];
 
-    // Keyboard and VoiceOver, as for its neighbours.
-    for (NSView *view in [pane subviews])
-        if ([view nextKeyView] == show && view != matrix) { [view setNextKeyView:matrix]; break; }
-    [matrix setNextKeyView:show];
+    // Keyboard and VoiceOver, as for its neighbours: after "Show scroll bars:".
+    [matrix setNextKeyView:[show nextKeyView]];
+    [show setNextKeyView:matrix];
     [matrix accessibilitySetOverrideValue:label forAttribute:NSAccessibilityTitleUIElementAttribute];
 
     // Kept for the pane's lifetime (the pane object keeps its view).
