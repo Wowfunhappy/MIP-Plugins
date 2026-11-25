@@ -151,7 +151,7 @@ static NSControlTint SLRealControlTint(NSScroller *scroller)
 // after the fact (sl_hysteresisCheck): the scroller, which arrow, and the
 // click's own mouse-down time (to tell it from later presses).
 static struct {
-    NSScroller *scroller;       // retained while shown
+    NSScroller *scroller;       // SLKeep'd while shown
     NSInteger arrow;
     BOOL maxEnd;
     NSTimeInterval timestamp;
@@ -490,7 +490,7 @@ static const NSTimeInterval kSLCornerFlashMinimum = 0.1;
 static NSTimeInterval gHeldPressDuration;      // how long a press handed to a scroller had been held
 static NSTimeInterval gHeldPressHandedOver;    // when (system uptime)
 static BOOL gHeldPressActive;                  // a handed-over press may still be down
-static NSWindow *gHeldPressWindow;             // its window (retained while it is)
+static NSWindow *gHeldPressWindow;             // its window (SLKeep'd while it is)
 
 // The window's edge cursor for wherever the mouse is now (as on a mouse move).
 static void SLRefreshEdgeCursor(NSWindow *window)
@@ -523,7 +523,7 @@ static void SLRefreshEdgeCursor(NSWindow *window)
         gHeldPressActive = NO;
         if (window && SL_ORIG(edgeResizingCursorUpdate)) SLRefreshEdgeCursor(window);
     }
-    [window release];
+    SLLetGo(window);
 }
 @end
 
@@ -651,7 +651,7 @@ static NSWindow *SLShowWebArrowPressed(const SLWebArrowPress *press)
     [overlay setContentView:content];
     [parent addChildWindow:overlay ordered:NSWindowAbove];
     [overlay display];
-    return overlay;
+    return SLKeep([overlay autorelease]);
 }
 
 static void SLHideWebArrowPressed(NSWindow *overlay)
@@ -659,22 +659,22 @@ static void SLHideWebArrowPressed(NSWindow *overlay)
     if (!overlay) return;
     [[overlay parentWindow] removeChildWindow:overlay];
     [overlay orderOut:nil];
-    [overlay release];
+    SLLetGo(overlay);
 }
 
-static NSWindow *gCornerFlashOverlay;       // a WebKit2 page's, while shown
+static NSWindow *gCornerFlashOverlay;       // a WebKit2 page's, while shown (SLKeep'd, as are the rest)
 static NSTimer *gCornerFlashTimer;
 
 static void SLEndCornerFlash(void)
 {
     [gCornerFlashTimer invalidate];
-    [gCornerFlashTimer release];
+    SLLetGo(gCornerFlashTimer);
     gCornerFlashTimer = nil;
     if (gCornerFlash.scroller) {
         NSScroller *scroller = gCornerFlash.scroller;
         gCornerFlash.scroller = nil;
         [scroller setNeedsDisplay:YES];
-        [scroller release];
+        SLLetGo(scroller);
     }
     SLHideWebArrowPressed(gCornerFlashOverlay);
     gCornerFlashOverlay = nil;
@@ -694,7 +694,7 @@ static void SLStartCornerFlash(NSScroller *scroller, NSPoint pointInWindow, NSTi
     SLEndCornerFlash();
     if (scroller) {
         NSScrollerPart part = [scroller testPart:pointInWindow];
-        gCornerFlash.scroller = [scroller retain];
+        gCornerFlash.scroller = SLKeep(scroller);
         gCornerFlash.arrow = (part == NSScrollerDecrementLine) ? NSScrollerDecrementArrow : NSScrollerIncrementArrow;
         gCornerFlash.maxEnd = SLPressIsInMaxEnd(scroller, pointInWindow);
         gCornerFlash.timestamp = timestamp;
@@ -702,8 +702,8 @@ static void SLStartCornerFlash(NSScroller *scroller, NSPoint pointInWindow, NSTi
     } else if (web && web->view) {
         gCornerFlashOverlay = SLShowWebArrowPressed(web);
     }
-    gCornerFlashTimer = [[NSTimer timerWithTimeInterval:duration target:[SLCornerFlashTimer class] selector:@selector(fire:)
-                                               userInfo:nil repeats:NO] retain];
+    gCornerFlashTimer = SLKeep([NSTimer timerWithTimeInterval:duration target:[SLCornerFlashTimer class] selector:@selector(fire:)
+                                                     userInfo:nil repeats:NO]);
     [[NSRunLoop currentRunLoop] addTimer:gCornerFlashTimer forMode:NSRunLoopCommonModes];
     [[NSRunLoop currentRunLoop] addTimer:gCornerFlashTimer forMode:NSEventTrackingRunLoopMode];
 }
@@ -750,8 +750,8 @@ static NSInteger sl_hysteresisCheck(id self, SEL _cmd, NSEvent *event, NSDate *e
             gHeldPressDuration = gHeldPressHandedOver - [event timestamp];
             // No longer a resize: drop the resize cursor.
             gHeldPressActive = YES;
-            [gHeldPressWindow release];
-            gHeldPressWindow = [[event window] retain];
+            SLLetGo(gHeldPressWindow);
+            gHeldPressWindow = SLKeep([event window]);
             [SLHeldPressWatcher watch];
             if ([NSCursor respondsToSelector:@selector(_setOverrideCursor:)])
                 ((void (*)(id, SEL, id))objc_msgSend)([NSCursor class], @selector(_setOverrideCursor:), nil);

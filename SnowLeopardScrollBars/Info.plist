@@ -21,6 +21,8 @@
 		<string>com.apple.AppKit</string>
 		<string>com.apple.HIToolbox</string>
 	</array>
+	<key>MIPSupportsGC</key>
+	<true/>
 	<key>SIMBLTargetApplications</key>
 	<array>
 		<dict>

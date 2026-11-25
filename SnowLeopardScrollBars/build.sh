@@ -32,4 +32,13 @@ clang -bundle -arch i386 -arch x86_64 -mmacosx-version-min=10.9 \
     -o "$BUNDLE/Contents/MacOS/$NAME" \
     SLScrollBars.m SLDraw.m SLWebKit.m SLArt.m SLCalendar.m SLSkinned.m SLPrefPane.m SLCarbon.m
 
+# Marked as supporting garbage collection, so it loads into GC apps too
+# (SLKeep, in SLScrollBars.h, explains what that asks of the code).
+MARKGC=../tools/build/markgc
+if [ ! -x "$MARKGC" ] || [ ../tools/markgc.cpp -nt "$MARKGC" ]; then
+    mkdir -p ../tools/build
+    clang++ -std=c++11 -o "$MARKGC" ../tools/markgc.cpp
+fi
+"$MARKGC" "$BUNDLE/Contents/MacOS/$NAME" > /dev/null
+
 echo "Built $BUNDLE"

@@ -744,7 +744,7 @@ static void SLImageAdded(const struct mach_header *header, intptr_t slide)
 void SLWebKitInstall(void)
 {
     if (SLLayerDisabled(@"appearance")) return;   // everything else builds on it
-    gWebScrollerImps = [[NSHashTable weakObjectsHashTable] retain];
+    gWebScrollerImps = SLKeep([NSHashTable weakObjectsHashTable]);
     SLInstallImpLayer();
 
     // WebCore is usually loaded already (WebContent links it); attach now so

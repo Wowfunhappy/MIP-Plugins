@@ -7,6 +7,20 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
+// ---- Garbage collection ---------------------------------------------------
+
+// The plugin also loads into apps that use garbage collection (Info.plist:
+// MIPSupportsGC; build.sh marks the binary as supporting GC with markgc, as
+// current compilers can't build for GC). It isn't compiled for GC, so the
+// collector sees neither its globals nor its ivars: an object kept beyond the
+// stack is held with SLKeep - CFRetain, which roots it under GC and is an
+// ordinary retain otherwise - and let go with SLLetGo (CFRelease). Not with
+// -retain/-release, which do nothing under GC. Objects held by associated
+// objects, by CF collections that retain, or created +1 by CF (Create/Copy)
+// are seen.
+static inline id SLKeep(id object) { if (object) CFRetain((CFTypeRef)object); return object; }
+static inline void SLLetGo(id object) { if (object) CFRelease((CFTypeRef)object); }
+
 // ---- SLArt.m -------------------------------------------------------------
 
 // Theme "kinds" used by AppKit 1038 for scroll bar art.
