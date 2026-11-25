@@ -218,8 +218,6 @@ static void (*SL_ORIG(setNeedsDisplayIfNotLB))(id, SEL);
 static void (*SL_ORIG(setNeedsDisplayIfNotLBInRect))(id, SEL, NSRect);
 static BOOL (*SL_ORIG(isCompatibleWithOverlay))(id, SEL);
 static void (*SL_ORIG(reallySetStyle))(id, SEL, NSScrollerStyle);
-static NSInteger (*SL_ORIG(recommendedStyle))(id, SEL);
-static void (*SL_ORIG(setRecommendedStyle))(id, SEL, NSInteger);
 
 static NSRect sl_rectForPart(NSScroller *self, SEL _cmd, NSScrollerPart part)
 {
@@ -892,38 +890,10 @@ static CGFloat sl_impKnobEndInset(id self, SEL _cmd)
 
 // ---- scroller style ------------------------------------------------------------
 //
-// Snow Leopard had no overlay scrollers, so the plugin turns AppKit's
-// recommendation into the legacy style - except when System Preferences >
-// General > Show scroll bars is "When scrolling", where it changes nothing at
-// all and the plugin stays out of the way.
-//
-// AppKit's private _NSScrollerStyleRecommender stores its recommendation in
-// -setRecommendedScrollerStyleAndNotify:, which posts
-// NSPreferredScrollerStyleDidChangeNotification when the stored value changes;
-// scroll views (and WebKit) follow that notification. Adjusting the value
-// there keeps that machinery working when the setting is switched.
-
-BOOL SLScrollBarsOnlyWhenScrolling(void)
-{
-    NSString *setting = [[NSUserDefaults standardUserDefaults] stringForKey:@"AppleShowScrollBars"];
-    return [setting isEqualToString:@"WhenScrolling"];
-}
-
-static NSInteger SLEffectiveStyle(NSInteger recommended)
-{
-    if (!gEnabled || SLScrollBarsOnlyWhenScrolling()) return recommended;
-    return NSScrollerStyleLegacy;
-}
-
-static void sl_setRecommendedStyle(id self, SEL _cmd, NSInteger style)
-{
-    SL_ORIG(setRecommendedStyle)(self, _cmd, SLEffectiveStyle(style));
-}
-
-static NSInteger sl_recommendedStyle(id self, SEL _cmd)
-{
-    return SLEffectiveStyle(SL_ORIG(recommendedStyle)(self, _cmd));
-}
+// Which kind of scroll bars an app has - classic or overlay - is AppKit's
+// choice, as without the plugin: "Show scroll bars" (Always, When scrolling,
+// or Automatically, by the pointing devices). The plugin only gives the
+// classic (legacy) ones 10.6's look.
 
 // ---- setup -----------------------------------------------------------------
 
@@ -1067,19 +1037,6 @@ BOOL SLHook(Class cls, SEL sel, IMP replacement, IMP *original)
     if (legacyImp) SLHook(legacyImp, @selector(knobEndInset), (IMP)sl_impKnobEndInset, (IMP *)&SL_ORIG(impKnobEndInset));
 
     gEnabled = YES;
-
-    Class recommender = NSClassFromString(@"_NSScrollerStyleRecommender");
-    if (recommender) {
-        SLHook(recommender, @selector(recommendedScrollerStyle), (IMP)sl_recommendedStyle, (IMP *)&SL_ORIG(recommendedStyle));
-        SEL setter = NSSelectorFromString(@"setRecommendedScrollerStyleAndNotify:");
-        id shared = [recommender respondsToSelector:@selector(sharedScrollerStyleRecommender)]
-                  ? [recommender performSelector:@selector(sharedScrollerStyleRecommender)] : nil;
-        if (SLHook(recommender, setter, (IMP)sl_setRecommendedStyle, (IMP *)&SL_ORIG(setRecommendedStyle)) && shared) {
-            // Store the effective style now, so a later change of setting is
-            // seen as a change.
-            ((void (*)(id, SEL, NSInteger))objc_msgSend)(shared, setter, SL_ORIG(recommendedStyle)(shared, @selector(recommendedScrollerStyle)));
-        }
-    }
 
     // Press and hold on a scroll arrow in the window's resize corner.
     Class windowMeta = object_getClass([NSWindow class]);

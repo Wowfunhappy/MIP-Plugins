@@ -38,13 +38,14 @@ typedef const void *(*SLGetImageFn)(const char *name);
 // How deep this thread is in HIToolbox's theme code for a scroll bar.
 static __thread int gScrollBarDepth;
 
-// As for AppKit's scroll bars, with the plugin (SLEffectiveStyle): unless
-// "Show scroll bars" is "When scrolling". (Asked directly: in a Carbon app,
-// without NSApp, the plugin's AppKit side - where it makes "Automatically"
-// mean legacy scroll bars - isn't set up.)
+// As for AppKit's scroll bars: when AppKit's scroller style is the classic
+// (legacy) one. Carbon's scroll bars are always classic, but with overlay
+// scroll bars everywhere else ("When scrolling", or "Automatically" with a
+// trackpad) they are left as Mavericks draws them. (AppKit is loaded with the
+// plugin, so it can be asked even in a Carbon app without NSApp.)
 static BOOL SLCarbonSnowLeopard(void)
 {
-    return !SLScrollBarsOnlyWhenScrolling();
+    return [NSScroller preferredScrollerStyle] == NSScrollerStyleLegacy;
 }
 
 static Boolean (*orig_useCoreUI)(void);
@@ -168,6 +169,17 @@ static OSStatus (*orig_thumbRegion)(const HIThemeTrackDrawInfo *, RgnHandle);
 static OSStatus sl_thumbRegion(const HIThemeTrackDrawInfo *info, RgnHandle rgn)
 { SL_IN(SLIsScrollBarKind(info)) OSStatus r = orig_thumbRegion(info, rgn); SL_OUT return r; }
 
+#if !__LP64__
+// Every view, not just the window's root: HIToolbox redraws a view from its
+// drawing cache unless the view itself is marked (HIView::DrawCacheOrSelf).
+static void SLCarbonRedraw(HIViewRef view)
+{
+    if (!view) return;
+    HIViewSetNeedsDisplay(view, true);
+    for (HIViewRef sub = HIViewGetFirstSubview(view); sub; sub = HIViewGetNextView(sub)) SLCarbonRedraw(sub);
+}
+#endif
+
 void SLCarbonInstall(void)
 {
     SLHookFn hook = (SLHookFn)dlsym(RTLD_DEFAULT, "MSHookFunction");
@@ -215,4 +227,22 @@ void SLCarbonInstall(void)
     hook(dragSB, sl_scrollBarDragBounds, (void **)&orig_scrollBarDragBounds);
     hook(thumbRgn, sl_thumbRegion, (void **)&orig_thumbRegion);
     hook(useCoreUI, sl_useCoreUI, (void **)&orig_useCoreUI);
+
+#if !__LP64__
+    // AppKit's scroller style can change while the app runs: a setting
+    // changed, a trackpad connected, or - with "Automatically" - AppKit
+    // settling its choice shortly after launch, once it has looked at the
+    // pointing devices (asynchronously), when the first windows may have been
+    // drawn already. AppKit's scroll views follow it
+    // (NSPreferredScrollerStyleDidChangeNotification); Carbon's windows are
+    // redrawn here. (Carbon windows exist only in 32-bit processes.)
+    [[NSNotificationCenter defaultCenter] addObserverForName:NSPreferredScrollerStyleDidChangeNotification object:nil queue:nil
+                                                  usingBlock:^(NSNotification *note) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        for (WindowRef window = GetWindowList(); window; window = GetNextWindow(window))
+            SLCarbonRedraw(HIViewGetRoot(window));
+#pragma clang diagnostic pop
+    }];
+#endif
 }

@@ -10,8 +10,8 @@
 //  WebKit changes between versions and Mavericks has third-party backports,
 //  so this file never uses WebCore struct offsets or hard-coded addresses.
 //  Like the AppKit side, it only acts while scrollbars use the legacy style;
-//  with overlay scrollbars ("show scroll bars when scrolling") every override
-//  defers to WebKit's own code.
+//  with overlay scrollbars ("When scrolling", or "Automatically" with a
+//  trackpad) every override defers to WebKit's own code.
 //  It works in independent layers; each one finds what it needs by name,
 //  checks it, and switches itself off (leaving that part of WebKit alone) if
 //  anything is missing:
@@ -152,7 +152,8 @@ static SLButtonRectFn orig_backButtonRect;
 static SLButtonRectFn orig_forwardButtonRect;
 
 // WebKit takes its scrollbar style from AppKit's recommendation, as NSScroll-
-// View does: overlay scrollbars ("when scrolling") are left entirely alone.
+// View does: overlay scrollbars ("When scrolling", or "Automatically" with a
+// trackpad) are left entirely alone.
 static BOOL SLWebKitUsesLegacyScrollbars(void)
 {
     return SLIsEnabled() && [NSScroller preferredScrollerStyle] == NSScrollerStyleLegacy;
