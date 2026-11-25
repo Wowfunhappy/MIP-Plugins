@@ -279,15 +279,30 @@ static NSDictionary *ArchiveUtilityPlusPreferences(void)
 
 // Archive Utility opens these types (and files with these extensions, if
 // another app's type claims them).
+//
+// A handler is only set when it isn't Archive Utility already: changing one
+// on 10.9 can make LaunchServices rewrite its preferences
+// (com.apple.LaunchServices) without the apps set to open in 32-bit mode
+// (Get Info's checkbox, LSArchitecturesForX86_64v2), a while after the call
+// returns - whoever changes the handler (seen with LSSetDefaultRoleHandler-
+// ForContentType from a plain tool). So this happens only the first time
+// Archive Utility runs after installing, or after a handler was changed.
+static void ArchiveUtilityPlusSetHandler(CFStringRef uti)
+{
+    CFStringRef current = LSCopyDefaultRoleHandlerForContentType(uti, kLSRolesViewer);
+    BOOL already = current && CFStringCompare(current, CFSTR("com.apple.archiveutility"), kCFCompareCaseInsensitive) == kCFCompareEqualTo;
+    if (current) CFRelease(current);
+    if (!already) LSSetDefaultRoleHandlerForContentType(uti, kLSRolesViewer | kLSRolesEditor, CFSTR("com.apple.archiveutility"));
+}
+
 static void ArchiveUtilityPlusSetDefaultHandler(void)
 {
     NSDictionary *types = ArchiveUtilityPlusTypes();
     for (NSString *extension in types) {
-        LSSetDefaultRoleHandlerForContentType((CFStringRef)types[extension], kLSRolesViewer | kLSRolesEditor,
-                                              CFSTR("com.apple.archiveutility"));
+        ArchiveUtilityPlusSetHandler((CFStringRef)types[extension]);
         CFStringRef uti = UTTypeCreatePreferredIdentifierForTag(kUTTagClassFilenameExtension, (CFStringRef)extension, kUTTypeData);
         if (uti) {
-            LSSetDefaultRoleHandlerForContentType(uti, kLSRolesViewer | kLSRolesEditor, CFSTR("com.apple.archiveutility"));
+            ArchiveUtilityPlusSetHandler(uti);
             CFRelease(uti);
         }
     }
