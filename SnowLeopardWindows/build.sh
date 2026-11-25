@@ -23,19 +23,13 @@ cp Info.plist "$BUNDLE/Contents/Info.plist"
 cp -R "$ASSETS/SLWindowArt.bin" "$ASSETS/SLWindowArt@2x.bin" "$ASSETS/SLTabArt" "$ASSETS/SLQuickTimeArt" \
     "$BUNDLE/Contents/Resources/"
 
-clang -bundle -arch i386 -arch x86_64 -mmacosx-version-min=10.9 \
-    -Os -Wall -Wno-deprecated-declarations -fno-objc-arc \
+# Built for garbage collection too (-fobjc-gc; see SLWindows.m), with the clang
+# that tools/gc-clang.sh provides.
+CLANG=$(../tools/gc-clang.sh)
+"$CLANG" -bundle -arch i386 -arch x86_64 -mmacosx-version-min=10.9 -isysroot "$(xcrun --show-sdk-path)" \
+    -fobjc-gc -Os -Wall -Wno-deprecated-declarations -fno-objc-arc \
     -framework Cocoa -framework Carbon -framework QuartzCore \
     -o "$BUNDLE/Contents/MacOS/$NAME" \
     SLWindows.m
-
-# Marked as supporting garbage collection, so it loads into GC apps too
-# (SLKeep, in SLWindows.m, explains what that asks of the code).
-MARKGC=../tools/build/markgc
-if [ ! -x "$MARKGC" ] || [ ../tools/markgc.cpp -nt "$MARKGC" ]; then
-    mkdir -p ../tools/build
-    clang++ -std=c++11 -o "$MARKGC" ../tools/markgc.cpp
-fi
-"$MARKGC" "$BUNDLE/Contents/MacOS/$NAME" > /dev/null
 
 echo "Built $BUNDLE"

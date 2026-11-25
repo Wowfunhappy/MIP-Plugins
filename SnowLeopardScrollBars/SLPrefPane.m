@@ -31,8 +31,6 @@
 static NSString *const kSLVariantKey = @"AppleScrollBarVariant";
 static NSString *const kSLVariantChanged = @"AppleAquaScrollBarVariantChanged";
 
-// Its ivars are plain retains: it only exists in System Preferences, which
-// doesn't use garbage collection (SLScrollBars.h).
 @interface SLArrowsPrefControl : NSObject {
     NSMatrix *_matrix;          // in the pane's view, which keeps them
     NSTextField *_label;
@@ -46,7 +44,7 @@ static NSString *const kSLVariantChanged = @"AppleAquaScrollBarVariantChanged";
 static NSInteger SLScrollArrowVariant(void)
 {
     CFPreferencesAppSynchronize(kCFPreferencesAnyApplication);
-    NSString *value = [(id)CFPreferencesCopyAppValue((CFStringRef)kSLVariantKey, kCFPreferencesAnyApplication) autorelease];
+    NSString *value = CFBridgingRelease(CFPreferencesCopyAppValue((CFStringRef)kSLVariantKey, kCFPreferencesAnyApplication));
     if (![value isKindOfClass:[NSString class]]) return 1;
     if ([value isEqualToString:@"Single"]) return 0;
     if ([value isEqualToString:@"DoubleBoth"]) return 2;

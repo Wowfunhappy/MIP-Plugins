@@ -27,7 +27,7 @@ static const SLThemeEntry kThemeTable[] = {
 #include "ThemeTable.inc"
 };
 
-static NSData *gRsrcData = nil;          // the whole resource file, kept alive forever (SLKeep)
+static NSData *gRsrcData = nil;          // the whole resource file, kept alive forever
 static const uint8_t *gRsrc = NULL;
 static size_t gRsrcLen = 0;
 static uint32_t gDataOffset = 0;
@@ -116,8 +116,7 @@ BOOL SLArtLoad(void)
     }
     if (CFDictionaryGetCount(offsets) == 0) { CFRelease(offsets); [data release]; return NO; }
 
-    gRsrcData = SLKeep(data);
-    [data release];
+    gRsrcData = data;
     gRsrc = d;
     gRsrcLen = len;
     gDataOffset = dataOff;

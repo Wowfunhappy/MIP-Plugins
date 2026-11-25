@@ -26,19 +26,13 @@ cp "$ASSETS/SLScrollArt@2x.bin" "$BUNDLE/Contents/Resources/"
 cp -R "$ASSETS/ArrowStrings/"*.lproj "$BUNDLE/Contents/Resources/"
 cp -R ApertureArt "$BUNDLE/Contents/Resources/"
 
-clang -bundle -arch i386 -arch x86_64 -mmacosx-version-min=10.9 \
-    -Os -Wall -Wno-deprecated-declarations -fno-objc-arc \
+# Built for garbage collection too (-fobjc-gc; see SLScrollBars.h), with the clang
+# that tools/gc-clang.sh provides.
+CLANG=$(../tools/gc-clang.sh)
+"$CLANG" -bundle -arch i386 -arch x86_64 -mmacosx-version-min=10.9 -isysroot "$(xcrun --show-sdk-path)" \
+    -fobjc-gc -Os -Wall -Wno-deprecated-declarations -fno-objc-arc \
     -framework Cocoa -framework QuartzCore -framework Carbon \
     -o "$BUNDLE/Contents/MacOS/$NAME" \
     SLScrollBars.m SLDraw.m SLWebKit.m SLArt.m SLCalendar.m SLSkinned.m SLPrefPane.m SLCarbon.m
-
-# Marked as supporting garbage collection, so it loads into GC apps too
-# (SLKeep, in SLScrollBars.h, explains what that asks of the code).
-MARKGC=../tools/build/markgc
-if [ ! -x "$MARKGC" ] || [ ../tools/markgc.cpp -nt "$MARKGC" ]; then
-    mkdir -p ../tools/build
-    clang++ -std=c++11 -o "$MARKGC" ../tools/markgc.cpp
-fi
-"$MARKGC" "$BUNDLE/Contents/MacOS/$NAME" > /dev/null
 
 echo "Built $BUNDLE"

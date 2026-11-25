@@ -237,13 +237,14 @@ void SLCarbonInstall(void)
     // (NSPreferredScrollerStyleDidChangeNotification); Carbon's windows are
     // redrawn here. (Carbon windows exist only in 32-bit processes.) The
     // observer is kept: under GC the notification center holds it weakly.
-    SLKeep([[NSNotificationCenter defaultCenter] addObserverForName:NSPreferredScrollerStyleDidChangeNotification object:nil queue:nil
+    static id observer;
+    observer = [[[NSNotificationCenter defaultCenter] addObserverForName:NSPreferredScrollerStyleDidChangeNotification object:nil queue:nil
                                                   usingBlock:^(NSNotification *note) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         for (WindowRef window = GetWindowList(); window; window = GetNextWindow(window))
             SLCarbonRedraw(HIViewGetRoot(window));
 #pragma clang diagnostic pop
-    }]);
+    }] retain];
 #endif
 }

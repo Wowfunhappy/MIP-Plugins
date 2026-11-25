@@ -60,13 +60,10 @@
 #import <Carbon/Carbon.h>
 #import <QuartzCore/QuartzCore.h>
 
-// Garbage collection: the plugin also loads into apps that use it (Info.plist:
-// MIPSupportsGC; build.sh marks the binary as supporting GC with markgc, as
-// current compilers can't build for GC). It isn't compiled for GC, so the
-// collector sees neither its globals nor its ivars: an object kept beyond the
-// stack is held with SLKeep - CFRetain, which roots it under GC and is an
-// ordinary retain otherwise - not -retain, which does nothing under GC.
-static inline id SLKeep(id object) { if (object) CFRetain((CFTypeRef)object); return object; }
+// Built with -fobjc-gc (build.sh), so it runs in apps that use garbage
+// collection as well as in the rest. Under GC, -retain, -release and -dealloc
+// do nothing, and the compiler's write barriers keep alive what globals and
+// ivars hold.
 #import <dlfcn.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -475,7 +472,7 @@ static id sl_titleString(id self, SEL _cmd)
     if (![string isKindOfClass:[NSAttributedString class]] || ![string length]) return string;
     static NSShadow *shadow;
     if (!shadow) {
-        shadow = SLKeep([[[NSShadow alloc] init] autorelease]);
+        shadow = [[NSShadow alloc] init];
         [shadow setShadowColor:[NSColor colorWithCalibratedWhite:1 alpha:0.4]];
         [shadow setShadowOffset:NSMakeSize(0, -1)];
         [shadow setShadowBlurRadius:0];
@@ -575,7 +572,7 @@ static NSColor *SLTexturedPattern(NSView *frame, BOOL active)
     if (height < 1) return nil;
 
     static NSMutableDictionary *cache;
-    if (!cache) cache = SLKeep([NSMutableDictionary dictionary]);
+    if (!cache) cache = [[NSMutableDictionary alloc] init];
     NSString *key = [NSString stringWithFormat:@"%g/%g/%g/%d/%g", height, top, bottom, active, [[frame window] backingScaleFactor]];
     NSColor *color = cache[key];
     if (color) return color;
@@ -761,7 +758,7 @@ static NSImage *SLQuickTimeArt(NSString *name)
 static NSString *SLAppIdentifier(void)
 {
     static NSString *app;
-    if (!app) app = SLKeep([[[[NSBundle mainBundle] bundleIdentifier] copy] autorelease] ?: @"");
+    if (!app) app = [[[NSBundle mainBundle] bundleIdentifier] copy] ?: @"";
     return app;
 }
 
@@ -872,9 +869,9 @@ static NSImage *SLAppButtonImage(NSString *name, NSImage *original)
         NSString *rest = [name hasPrefix:@"ib_tb_"] ? [name substringFromIndex:6] : name;
         static NSDictionary *tints, *states, *buttons;
         if (!tints) {
-            tints = SLKeep(@{ @"Aqua": @"aqua", @"Graphite": @"graphite" });
-            states = SLKeep(@{ @"Normal": @"active", @"Hover": @"rollover", @"Pressed": @"pressed", @"Inactive": @"inactive" });
-            buttons = SLKeep(@{ @"Close": @"titlebarclose", @"Minimize": @"titlebarcollapse", @"Zoom": @"titlebarzoom" });
+            tints = [@{ @"Aqua": @"aqua", @"Graphite": @"graphite" } retain];
+            states = [@{ @"Normal": @"active", @"Hover": @"rollover", @"Pressed": @"pressed", @"Inactive": @"inactive" } retain];
+            buttons = [@{ @"Close": @"titlebarclose", @"Minimize": @"titlebarcollapse", @"Zoom": @"titlebarzoom" } retain];
         }
         for (NSString *tint in tints)
             for (NSString *state in states)
@@ -909,7 +906,7 @@ static id SLReplaced(NSImage *image, NSString *name)
     if (!image || ![name isKindOfClass:[NSString class]]) return image;
     static NSMutableDictionary *cache;
     @synchronized ([NSImage class]) {
-        if (!cache) cache = SLKeep([NSMutableDictionary dictionary]);
+        if (!cache) cache = [[NSMutableDictionary alloc] init];
         id replacement = cache[name];
         if (!replacement) cache[name] = replacement = SLReplacementImage(image, name) ?: (id)[NSNull null];   // NSNull: 10.6 has nothing for it
         return replacement != [NSNull null] ? replacement : image;
@@ -1050,10 +1047,10 @@ static int sl_CUICreateOrUpdateLayer(CFTypeRef renderer, CFDictionaryRef options
 
     SLWindowFrameLayer *frameLayer = (SLWindowFrameLayer *)*layer;
     if (!frameLayer) {
-        // The caller's, +1 as CoreUI's would be: CFRetain'd, which is what
-        // keeps it alive under GC too (AppKit gets it in an ivar, with no
-        // write barrier, so relies on that).
-        frameLayer = SLKeep([[[SLWindowFrameLayer alloc] init] autorelease]);
+        // The caller's, +1 as CoreUI's would be. Under GC that is a CFRetain
+        // (which -init isn't): AppKit treats the layer as a Create result.
+        frameLayer = [[SLWindowFrameLayer alloc] init];
+        if ([NSGarbageCollector defaultCollector]) CFRetain((CFTypeRef)frameLayer);
         frameLayer.needsDisplayOnBoundsChange = YES;
         *layer = frameLayer;
     }
