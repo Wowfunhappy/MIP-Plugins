@@ -249,6 +249,47 @@ static NSScrollerPart sl_testPart(NSScroller *self, SEL _cmd, NSPoint point)
     return SLHitTest(&st, [self convertPoint:point fromView:nil]);
 }
 
+// Notes' note list has no divider above it: its scroll bar starts at the
+// top of the list, under the search field on the same white, and 10.6's top
+// end (the cap, or the top arrow) stops there with a hard edge. That end is
+// feathered into the list behind it: the scroll bar's top kSLTopFeather
+// points fade from transparent at the top, whatever is drawn there.
+static const CGFloat kSLTopFeather = 12;
+
+static CGFloat SLTopFeather(NSScroller *scroller)
+{
+    static Class noteList;
+    static BOOL notes;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        notes = [[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.Notes"];
+        noteList = NSClassFromString(@"NoteListView");
+    });
+    if (!notes || !noteList || (SL_SFLAGS(scroller) & kSFlagHorizontal)) return 0;
+    for (NSView *v = [scroller superview]; v; v = [v superview])
+        if ([v isKindOfClass:noteList]) return kSLTopFeather;
+    return 0;
+}
+
+static void SLFeatherTop(NSScroller *self, CGFloat length)
+{
+    NSRect bounds = [self bounds];
+    BOOL flipped = [self isFlipped];
+    CGFloat top = flipped ? NSMinY(bounds) : NSMaxY(bounds);
+    CGFloat end = flipped ? top + length : top - length;
+    NSRect band = NSMakeRect(NSMinX(bounds), MIN(top, end), NSWidth(bounds), length);
+    CGContextRef ctx = (CGContextRef)[[NSGraphicsContext currentContext] graphicsPort];
+    CGContextSaveGState(ctx);
+    CGContextClipToRect(ctx, NSRectToCGRect(band));
+    CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+    CGGradientRef gradient = CGGradientCreateWithColorComponents(gray, (CGFloat[]){ 0, 0, 0, 1 }, NULL, 2);   // alpha 0 -> 1
+    CGColorSpaceRelease(gray);
+    CGContextSetBlendMode(ctx, kCGBlendModeDestinationIn);
+    CGContextDrawLinearGradient(ctx, gradient, CGPointMake(0, top), CGPointMake(0, end), 0);
+    CGGradientRelease(gradient);
+    CGContextRestoreGState(ctx);
+}
+
 static void sl_drawRect(NSScroller *self, SEL _cmd, NSRect dirty)
 {
     if (!SLIsLegacy(self)) { SL_ORIG(drawRect)(self, _cmd, dirty); return; }
@@ -283,6 +324,9 @@ static void sl_drawRect(NSScroller *self, SEL _cmd, NSRect dirty)
                 break;
         }
     }
+
+    CGFloat feather = SLTopFeather(self);
+    if (feather > 0) SLFeatherTop(self, feather);
 }
 
 static void sl_drawKnob(NSScroller *self, SEL _cmd)
@@ -373,7 +417,7 @@ static BOOL sl_isOpaque(NSScroller *self, SEL _cmd)
 {
     // An app's own skin may have a translucent track.
     if (!SLIsLegacy(self) || SLSkinHandled(self)) return SL_ORIG(isOpaque)(self, _cmd);
-    return YES;
+    return SLTopFeather(self) == 0;     // a feathered top shows what is behind it
 }
 
 // With arrows at both ends, which pair a press (at a point in the window)
