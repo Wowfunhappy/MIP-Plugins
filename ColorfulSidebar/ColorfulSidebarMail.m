@@ -16,18 +16,20 @@
 //    of it only at 16. A colour icon is drawn in the template's place keeping
 //    its proportions, as large as fits but never larger than its biggest
 //    pixel version allows (so shrunk if need be, never enlarged; centred).
-//  - On a 2x display, the medium and large sizes would need art Mail doesn't
-//    have, so there every mailbox keeps Mail's grey template. Small at 2x and
-//    every size at 1x are in colour. The sidebar's window decides which (a row
-//    not yet in a window is set up in colour, and set up again when it moves
-//    into one or its window's scale changes).
+//  - Only where there is colour art made for the size: the small size (16
+//    points, 1x and 2x) and the large size at 1x (32 points). The medium size
+//    (18 points) has none - its icons would be shrunk 32-pixel art - and the
+//    large size at 2x would need 64-pixel art Mail mostly lacks, so there
+//    every mailbox keeps Mail's grey template. The sidebar's window decides
+//    which (a row not yet in a window is set up as at 1x, and set up again
+//    when it moves into one or its window's scale changes).
 //  - Where Mail has no colour icon at a size, its colour icon from the small
-//    size (an account's container mailbox at medium size).
+//    size.
 //  - Trash: Snow Leopard's Mail trash can (Resources/SnowLeopardTrashMailbox*,
 //    copied from Mac OS X 10.6's Mail.app: 16 pixels, and 32 for 2x), not the
 //    system trash Mail uses.
 //  - Junk, where Snow Leopard's small drawing can be shown without enlarging it
-//    (small and medium sizes at 1x): Snow Leopard's Mail's 16-pixel Junk icon
+//    (the small size at 1x): Snow Leopard's Mail's 16-pixel Junk icon
 //    (Resources/SnowLeopardJunkMailbox.png), a different drawing from the
 //    shrunk large one Mail uses. Elsewhere Mail's (Snow Leopard's large one).
 //  - Flagged: Mail's own colour icon (flagged-0) is 13 by 15 points and has
@@ -131,13 +133,13 @@ static NSImage *ColorfulSidebarFitted(NSImage *image, NSSize box)
 {
     NSImage *template = ZKOrig(NSImage *, mailbox, size, style);
     if (!gInSidebar || !(style & 1) || ![template isKindOfClass:[NSImage class]]) return template;
-    if (gSidebarScale >= 2 && size >= 1) return template;           // no colour art that large
+    if (size == 1 || (size == 2 && gSidebarScale >= 2)) return template;   // no colour art made for it
 
     NSString *name = [template name];
     NSImage *colour;
     if ([name hasPrefix:@"TrashMailbox"]) {
         colour = ColorfulSidebarTrash();
-    } else if ([name hasPrefix:@"JunkMailbox"] && size < 2 && gSidebarScale < 2) {
+    } else if ([name hasPrefix:@"JunkMailbox"] && size == 0 && gSidebarScale < 2) {
         colour = ColorfulSidebarJunk();
     } else if ([name hasPrefix:@"FlagsMailbox"]) {
         colour = ColorfulSidebarFlagged();
