@@ -23,11 +23,12 @@
 //    - rollover without the + is the normal art; pressed without it is the
 //      pressed art with the + filled in from the normal art, mapped the way
 //      pressed darkens normal elsewhere (a per-channel linear fit);
-//    - the arrows (Yosemite's, Resources/FullScreen*Glyph*.png: how far each
+//    - the arrows (Yosemite's, Resources/FullScreenEnterGlyph[@2x].png: how far each
 //      pixel moves toward the glyph colour, extracted from OS X 10.10's
 //      SystemAppearance.car) are scaled so that Yosemite's + would match this
 //      +, centred where it was, and darken the button as the + did, channel by
-//      channel. Enter arrows, or exit arrows in a full-screen window.
+//      channel. (Only the enter arrows: Mavericks shows no title bar buttons
+//      in full screen.)
 //  Results are cached by CUIDraw's options. CUIDraw is hooked once the app has
 //  finished launching, so that it comes before any other plugin's hook that
 //  draws the buttons itself (SnowLeopardWindows), whose art it then gets.
@@ -42,11 +43,10 @@
 typedef OSStatus (*GreenFullscreenCUIDrawFn)(CFTypeRef renderer, CGRect rect, CGContextRef ctx, CFDictionaryRef options, CFDictionaryRef *result);
 static GreenFullscreenCUIDrawFn orig_CUIDraw;
 
-enum { kGlyphNone = 0, kGlyphEnter, kGlyphExit };
-static __thread int gZoomGlyph;                 // set while a full-screen zoom button draws
+static __thread BOOL gDrawingZoom;              // set while a full-screen zoom button draws
 
-static CGImageRef gGlyphs[3][2];                // [kind][0 = 1x, 1 = 2x]: coverage masks (Gray)
-static NSMutableDictionary *gArtCache;          // options + scale + kind -> CGImage
+static CGImageRef gArrows[2];                   // [0 = 1x, 1 = 2x]: coverage masks (Gray)
+static NSMutableDictionary *gArtCache;          // options + scale -> CGImage
 
 #pragma mark - Zoom menu items
 
@@ -109,7 +109,7 @@ static NSMutableData *GreenFullscreenGlyphMask(CGImageRef glyph, size_t w, size_
     return mask;
 }
 
-static CGImageRef GreenFullscreenCopyArt(CFTypeRef renderer, NSDictionary *options, CGSize size, CGFloat scale, int kind)
+static CGImageRef GreenFullscreenCopyArt(CFTypeRef renderer, NSDictionary *options, CGSize size, CGFloat scale)
 {
     size_t w = (size_t)ceil(size.width * scale), h = (size_t)ceil(size.height * scale);
     if (w == 0 || h == 0 || w > 256 || h > 256) return nil;
@@ -173,7 +173,7 @@ static CGImageRef GreenFullscreenCopyArt(CFTypeRef renderer, NSDictionary *optio
     // The arrows, scaled as Yosemite's + (8 points square) would be to this one.
     CGFloat plusSize = MAX(maxX - minX, maxY - minY) + 1;
     CGFloat glyphScale = plusSize / 8.0;
-    CGImageRef glyph = gGlyphs[kind][plusSize > 10 ? 1 : 0];
+    CGImageRef glyph = gArrows[plusSize > 10 ? 1 : 0];
     if (!glyph) return nil;
     CGFloat glyphSize = 16 * glyphScale;
     // Pixel rows run top to bottom in memory; CoreGraphics' y runs bottom to top.
@@ -198,8 +198,7 @@ static CGImageRef GreenFullscreenCopyArt(CFTypeRef renderer, NSDictionary *optio
 static OSStatus GreenFullscreen_CUIDraw(CFTypeRef renderer, CGRect rect, CGContextRef ctx, CFDictionaryRef options, CFDictionaryRef *result)
 {
     NSDictionary *o = (NSDictionary *)options;
-    int kind = gZoomGlyph;
-    if (!kind || !ctx || ![o isKindOfClass:[NSDictionary class]] || ![o[@"widget"] isEqual:@"titlebarzoom"]
+    if (!gDrawingZoom || !ctx || ![o isKindOfClass:[NSDictionary class]] || ![o[@"widget"] isEqual:@"titlebarzoom"]
         || !([o[@"state"] isEqual:@"rollover"] || [o[@"state"] isEqual:@"pressed"]) || [o[@"kCUIMaskOnlyKey"] boolValue])
         return orig_CUIDraw(renderer, rect, ctx, options, result);
 
@@ -208,13 +207,12 @@ static OSStatus GreenFullscreen_CUIDraw(CFTypeRef renderer, CGRect rect, CGConte
     NSMutableDictionary *key = [[o mutableCopy] autorelease];
     key[@"GreenFullscreen.scale"] = @(scale);
     key[@"GreenFullscreen.size"] = [NSValue valueWithSize:NSSizeFromCGSize(rect.size)];
-    key[@"GreenFullscreen.glyph"] = @(kind);
     key[@"GreenFullscreen.tint"] = @([NSColor currentControlTint]);
     CGImageRef image;
     @synchronized (gArtCache) {
         image = (CGImageRef)gArtCache[key];
         if (!image) {
-            image = GreenFullscreenCopyArt(renderer, o, rect.size, scale, kind);
+            image = GreenFullscreenCopyArt(renderer, o, rect.size, scale);
             if (!image) return orig_CUIDraw(renderer, rect, ctx, options, result);
             if ([gArtCache count] > 64) [gArtCache removeAllObjects];
             gArtCache[key] = (id)image;
@@ -263,12 +261,10 @@ static OSStatus GreenFullscreen_CUIDraw(CFTypeRef renderer, CGRect rect, CGConte
 // AppKit's title bar button cell (_NSThemeWidgetCell): marks the drawing of a
 // zoom button that toggles full screen - drawn, or (a layer-backed button)
 // its layer updated.
-static int GreenFullscreenGlyphFor(NSView *view)
+static BOOL GreenFullscreenIsOurZoomButton(NSView *view)
 {
     NSWindow *window = [view window];
-    if (!window || view != [window standardWindowButton:NSWindowZoomButton] || [(NSButton *)view action] != @selector(toggleFullScreen:))
-        return kGlyphNone;
-    return ([window styleMask] & NSFullScreenWindowMask) ? kGlyphExit : kGlyphEnter;
+    return window && view == [window standardWindowButton:NSWindowZoomButton] && [(NSButton *)view action] == @selector(toggleFullScreen:);
 }
 
 @interface GreenFullscreen_NSThemeWidgetCell : NSButtonCell
@@ -278,18 +274,18 @@ static int GreenFullscreenGlyphFor(NSView *view)
 
 - (void)drawWithFrame:(NSRect)frame inView:(NSView *)view
 {
-    int outer = gZoomGlyph;
-    gZoomGlyph = GreenFullscreenGlyphFor(view);
+    BOOL outer = gDrawingZoom;
+    gDrawingZoom = GreenFullscreenIsOurZoomButton(view);
     ZKOrig(void, frame, view);
-    gZoomGlyph = outer;
+    gDrawingZoom = outer;
 }
 
 - (void)updateLayerWithFrame:(NSRect)frame inView:(NSView *)view
 {
-    int outer = gZoomGlyph;
-    gZoomGlyph = GreenFullscreenGlyphFor(view);
+    BOOL outer = gDrawingZoom;
+    gDrawingZoom = GreenFullscreenIsOurZoomButton(view);
     ZKOrig(void, frame, view);
-    gZoomGlyph = outer;
+    gDrawingZoom = outer;
 }
 
 @end
@@ -308,17 +304,14 @@ static int GreenFullscreenGlyphFor(NSView *view)
     HookFn hookFunction = (HookFn)dlsym(RTLD_DEFAULT, "MSHookFunction");
     void *cuiDraw = dlsym(RTLD_DEFAULT, "CUIDraw");
     NSBundle *bundle = [NSBundle bundleForClass:self];
-    NSString *names[3] = { nil, @"FullScreenEnterGlyph", @"FullScreenExitGlyph" };
-    for (int kind = kGlyphEnter; kind <= kGlyphExit; kind++) {
-        for (int x2 = 0; x2 < 2; x2++) {
-            NSURL *url = [bundle URLForResource:[names[kind] stringByAppendingString:x2 ? @"@2x" : @""] withExtension:@"png"];
-            CGImageSourceRef source = url ? CGImageSourceCreateWithURL((CFURLRef)url, NULL) : NULL;
-            if (!source) continue;
-            gGlyphs[kind][x2] = CGImageSourceCreateImageAtIndex(source, 0, NULL);
-            CFRelease(source);
-        }
+    for (int x2 = 0; x2 < 2; x2++) {
+        NSURL *url = [bundle URLForResource:x2 ? @"FullScreenEnterGlyph@2x" : @"FullScreenEnterGlyph" withExtension:@"png"];
+        CGImageSourceRef source = url ? CGImageSourceCreateWithURL((CFURLRef)url, NULL) : NULL;
+        if (!source) continue;
+        gArrows[x2] = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+        CFRelease(source);
     }
-    if (!hookFunction || !cuiDraw || !gGlyphs[kGlyphEnter][0] || !gGlyphs[kGlyphEnter][1] || !gGlyphs[kGlyphExit][0] || !gGlyphs[kGlyphExit][1]) {
+    if (!hookFunction || !cuiDraw || !gArrows[0] || !gArrows[1]) {
         NSLog(@"GreenFullscreen: the zoom button keeps its + (%@).", (!hookFunction || !cuiDraw) ? @"no MSHookFunction or CUIDraw" : @"the bundle's arrows are missing");
         return;
     }
