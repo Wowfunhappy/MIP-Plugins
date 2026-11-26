@@ -26,6 +26,10 @@
 //  - Trash: Snow Leopard's Mail trash can (Resources/SnowLeopardTrashMailbox*,
 //    copied from Mac OS X 10.6's Mail.app: 16 pixels, and 32 for 2x), not the
 //    system trash Mail uses.
+//  - Junk, where Snow Leopard's small drawing can be shown without enlarging it
+//    (small and medium sizes at 1x): Snow Leopard's Mail's 16-pixel Junk icon
+//    (Resources/SnowLeopardJunkMailbox.png), a different drawing from the
+//    shrunk large one Mail uses. Elsewhere Mail's (Snow Leopard's large one).
 //  - Flagged: Mail's own colour icon (flagged-0) is 13 by 15 points and has
 //    no large version; Resources/FlaggedMailbox.tiff (32 points, 1x and 2x) is
 //    Mail's large red flag (FlagRedLarge) recoloured to resemble it.
@@ -64,6 +68,22 @@ static NSImage *ColorfulSidebarTrash(void)
         [trash addRepresentation:small];
         [trash addRepresentation:large];
         image = trash;
+    }
+    return image;
+}
+
+// Snow Leopard's small Junk icon: 16 points, 16 pixels.
+static NSImage *ColorfulSidebarJunk(void)
+{
+    static NSImage *image;
+    if (!image) {
+        NSString *path = ColorfulSidebarResource(@"SnowLeopardJunkMailbox", @"png");
+        NSImageRep *rep = path ? [NSImageRep imageRepWithContentsOfFile:path] : nil;
+        if (!rep) return nil;
+        [rep setSize:NSMakeSize(16, 16)];
+        NSImage *junk = [[NSImage alloc] initWithSize:NSMakeSize(16, 16)];
+        [junk addRepresentation:rep];
+        image = junk;
     }
     return image;
 }
@@ -117,6 +137,8 @@ static NSImage *ColorfulSidebarFitted(NSImage *image, NSSize box)
     NSImage *colour;
     if ([name hasPrefix:@"TrashMailbox"]) {
         colour = ColorfulSidebarTrash();
+    } else if ([name hasPrefix:@"JunkMailbox"] && size < 2 && gSidebarScale < 2) {
+        colour = ColorfulSidebarJunk();
     } else if ([name hasPrefix:@"FlagsMailbox"]) {
         colour = ColorfulSidebarFlagged();
     } else {
