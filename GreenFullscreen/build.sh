@@ -21,7 +21,7 @@ chmod 644 "$BUNDLE/Contents/Info.plist"
 CLANG=$(../tools/gc-clang.sh)
 "$CLANG" -bundle -arch i386 -arch x86_64 -mmacosx-version-min=10.9 -isysroot "$(xcrun --show-sdk-path)" \
     -fobjc-gc -Os -Wall -Wno-deprecated-declarations -fno-objc-arc -I../ZKSwizzle \
-    -framework Cocoa -framework ApplicationServices \
+    -framework Cocoa -framework ApplicationServices -framework Carbon \
     -o "$BUNDLE/Contents/MacOS/$NAME" \
     GreenFullscreen.m ../ZKSwizzle/ZKSwizzle.m
 

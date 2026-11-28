@@ -35,8 +35,34 @@
 //  Only zoom buttons GreenFullscreen set up are changed: AppKit's cell marks
 //  them while it draws (Carbon windows, which keep zooming, keep their +).
 //
+//  The menu bar's exit-full-screen button moves from the right end to the left
+//  end, before the Apple menu. Mavericks' button on the right is a status item
+//  AppKit makes for each full-screen space (-[_NSFullScreenTransition
+//  makeExitFullScreenStatusItem]), which is no longer made. HIToolbox's menu
+//  bar view (HIMenuBarView, one per display, drawn on that display's menu bar
+//  in every space) has a button of its own at the left end, which nothing in
+//  Mavericks turns on: with a flag set, the view moves its menus right to make
+//  room (from 10 points to 42), draws the button (part 10000), and tracks it,
+//  calling HIExitFullScreenMode when it is clicked. The flag is set while the
+//  view's display shows one of the app's full-screen windows: checked whenever
+//  the view lays itself out (HIMenuBarView::EnsureBarLayout, before it draws
+//  or hit-tests), with the layout invalidated when the answer changes. Where
+//  the flag is in the view is read from the code that tests it for part
+//  10000 (HIMenuBarView::GetPartBoundsSelf), so no offset is assumed. The
+//  button was left unfinished, so:
+//    - it draws a zoom button: drawn instead (in the CUIDraw hook) is the art
+//      AppKit's status item drew, in the same place from the top;
+//    - the Apple logo doesn't move with the menus: the window server draws it,
+//      on full-screen menu bars from a window HIToolbox draws once at 10
+//      points from the left. That window is left empty and the view draws the
+//      logo itself, in the Apple menu's place;
+//    - a click asks NSApp to leave full screen on every display: it takes only
+//      the clicked display's full-screen window out of full screen.
+//  If anything is missing, the status item stays where it was.
+//
 
 #import <AppKit/AppKit.h>
+#import <Carbon/Carbon.h>
 #import <dlfcn.h>
 #import "ZKSwizzle.h"
 
@@ -195,9 +221,34 @@ static CGImageRef GreenFullscreenCopyArt(CFTypeRef renderer, NSDictionary *optio
     return image;
 }
 
+static __thread BOOL gDrawingMenuBar;           // set while an HIMenuBarView draws (see below)
+
+// The menu bar's exit button (see below) is drawn as a title bar widget (a zoom
+// button). In its place goes what AppKit's status item drew: CoreUI's
+// TitlebarExitFullScreenTemplate, on, on a raised menu bar background (as
+// NSStatusBarButtonCell draws it), centred on the widget and the same height
+// from the top of the menu bar as the status item's.
+static OSStatus GreenFullscreenDrawExitButton(CFTypeRef renderer, CGRect rect, CGContextRef ctx, NSDictionary *o, CFDictionaryRef *result)
+{
+    if ([o[@"kCUIMaskOnlyKey"] boolValue]) return noErr;
+    NSDictionary *art = @{
+        @"widget": @"image",
+        @"imageNameKey": @"image.TitlebarExitFullScreenTemplate",
+        @"imageIsGrayscaleKey": @YES,
+        @"value": @YES,
+        @"state": [o[@"state"] isEqual:@"pressed"] ? @"pressed" : @"normal",
+        @"backgroundTypeKey": @"kCUIBackgroundTypeMenuBarRaised",
+        @"kCUIUserInterfaceLayoutDirectionKey": @"kCUIUserInterfaceLayoutDirectionLeftToRight",
+    };
+    CGRect artRect = CGRectMake(floor(CGRectGetMidX(rect) - 14.5), floor(CGRectGetMidY(rect) - 11.5), 29, 23);
+    return orig_CUIDraw(renderer, artRect, ctx, (CFDictionaryRef)art, result);
+}
+
 static OSStatus GreenFullscreen_CUIDraw(CFTypeRef renderer, CGRect rect, CGContextRef ctx, CFDictionaryRef options, CFDictionaryRef *result)
 {
     NSDictionary *o = (NSDictionary *)options;
+    if (gDrawingMenuBar && ctx && [o isKindOfClass:[NSDictionary class]] && [o[@"widget"] isEqual:@"titlebarzoom"])
+        return GreenFullscreenDrawExitButton(renderer, rect, ctx, o, result);
     if (!gDrawingZoom || !ctx || ![o isKindOfClass:[NSDictionary class]] || ![o[@"widget"] isEqual:@"titlebarzoom"]
         || !([o[@"state"] isEqual:@"rollover"] || [o[@"state"] isEqual:@"pressed"]) || [o[@"kCUIMaskOnlyKey"] boolValue])
         return orig_CUIDraw(renderer, rect, ctx, options, result);
@@ -230,6 +281,232 @@ static OSStatus GreenFullscreen_CUIDraw(CFTypeRef renderer, CGRect rect, CGConte
     CGImageRelease(image);
     return noErr;
 }
+
+#pragma mark - The menu bar's exit button
+
+// Exported by HIToolbox and CoreGraphics in 64-bit too, though only declared for 32-bit or not at all.
+extern OSStatus HIWindowGetBounds(WindowRef window, WindowRegionCode region, HICoordinateSpace space, HIRect *bounds);
+extern void DrawMenuBar(void);
+extern int CGSMainConnectionID(void);
+extern CGContextRef CGWindowContextCreate(int cid, uint32_t wid, CFDictionaryRef options);
+
+typedef void (*GreenFullscreenVoidFn)(void);
+typedef void (*GreenFullscreenViewFn)(void *view);
+typedef WindowRef (*GreenFullscreenGetWindowRefFn)(void *view);
+typedef void (*GreenFullscreenGetTitleBoundsFn)(void *view, int index, CGRect *bounds);
+typedef void (*GreenFullscreenDrawOnceFn)(void *view, CGRect bar, CGRect dirty, bool c, bool opaque, bool e, bool f, CGContextRef ctx);
+typedef OSStatus (*GreenFullscreenDrawAppleMenuTitleFn)(const CGRect *bar, const CGRect *title, int state, int flags, void *a, void *b, CGContextRef ctx, int orientation);
+typedef CFDictionaryRef (*GreenFullscreenCopyGlobalSettingsFn)(void *unused);
+
+static GreenFullscreenViewFn orig_EnsureBarLayout;
+static GreenFullscreenDrawOnceFn orig_DrawOnce;
+static GreenFullscreenDrawAppleMenuTitleFn orig_HIThemeDrawAppleMenuTitle;
+static GreenFullscreenCopyGlobalSettingsFn orig_CopyGlobalSettings;
+static GreenFullscreenVoidFn orig_HIExitFullScreenMode;
+static GreenFullscreenVoidFn GreenFullscreenInvalMenuBarLayout;
+static GreenFullscreenGetWindowRefFn GreenFullscreenHIViewGetWindowRef;
+static GreenFullscreenGetTitleBoundsFn GreenFullscreenGetTitleBounds;
+static uint32_t *gFullScreenAppleWindow;        // HIToolbox's window for the logo on full-screen menu bars
+static long gExitButtonFlag = -1;               // offset in HIMenuBarView of the byte whose bit 0 shows the button
+static BOOL gExitButtonOnLeft;
+static __thread BOOL gDrewAppleMenuTitle, gDrawingAppleWindow;
+
+static BOOL GreenFullscreenShowsExitButton(void *view)
+{
+    return (((uint8_t *)view)[gExitButtonFlag] & 1) != 0;
+}
+
+// Where HIMenuBarView::GetPartBoundsSelf(part, rect) tests the flag for the
+// button: `cmpw $10000, part`, a jne, then `testb $1, disp32(this)`
+// (x86_64: f6 87 disp32 01; i386: f6 86 disp32 01). -1 if it isn't there.
+static long GreenFullscreenFindExitButtonFlag(const uint8_t *code)
+{
+    for (int i = 0; i < 64; i++) {
+        if (code[i] != 0x10 || code[i + 1] != 0x27) continue;
+        for (int j = i + 2; j < i + 12; j++) {
+            uint8_t modrm = code[j + 1];
+            if (code[j] == 0xf6 && (modrm & 0xf8) == 0x80 && (modrm & 7) != 4 && code[j + 6] == 0x01) {
+                int32_t offset;
+                memcpy(&offset, code + j + 2, sizeof offset);
+                return offset > 0 && offset < 0x1000 ? offset : -1;
+            }
+        }
+        return -1;
+    }
+    return -1;
+}
+
+static CGDirectDisplayID GreenFullscreenDisplayID(NSScreen *screen)
+{
+    return [[[screen deviceDescription] objectForKey:@"NSScreenNumber"] unsignedIntValue];
+}
+
+// The app's full-screen window shown on `displayID` (in its current space), if any.
+static NSWindow *GreenFullscreenWindowOnDisplay(CGDirectDisplayID displayID)
+{
+    for (NSWindow *window in [NSApp windows]) {
+        if (([window styleMask] & NSFullScreenWindowMask) && [window isVisible] && [window isOnActiveSpace]
+            && GreenFullscreenDisplayID([window screen]) == displayID) return window;
+    }
+    return nil;
+}
+
+// Before the view lays itself out (and so before it draws or hit-tests): the
+// button is shown while its display shows a full-screen window of the app's.
+static void GreenFullscreen_EnsureBarLayout(void *view)
+{
+    BOOL show = NO;
+    WindowRef menuBarWindow = GreenFullscreenHIViewGetWindowRef(view);
+    HIRect bounds;
+    if (menuBarWindow && HIWindowGetBounds(menuBarWindow, kWindowStructureRgn, kHICoordSpace72DPIGlobal, &bounds) == noErr) {
+        CGDirectDisplayID displayID;
+        uint32_t count = 0;
+        if (CGGetDisplaysWithPoint(CGPointMake(CGRectGetMidX(bounds), CGRectGetMinY(bounds)), 1, &displayID, &count) == kCGErrorSuccess && count)
+            show = GreenFullscreenWindowOnDisplay(displayID) != nil;
+    }
+    uint8_t *flag = (uint8_t *)view + gExitButtonFlag;
+    if (((*flag & 1) != 0) != show) {
+        *flag = (*flag & ~1) | show;
+        GreenFullscreenInvalMenuBarLayout();
+    }
+    orig_EnsureBarLayout(view);
+}
+
+// The Apple menu's title (its logo). The view draws it only while the menu is
+// open, or when it draws the menu bar opaque; otherwise the window server draws
+// it - on full-screen menu bars from a window of the app's, 10 points from the
+// left, where the menus begin without the button. That window is left empty
+// (below), and the view draws the logo where the button has moved it.
+static OSStatus GreenFullscreen_HIThemeDrawAppleMenuTitle(const CGRect *bar, const CGRect *title, int state, int flags, void *a, void *b, CGContextRef ctx, int orientation)
+{
+    if (gDrawingAppleWindow) return noErr;
+    gDrewAppleMenuTitle = YES;
+    return orig_HIThemeDrawAppleMenuTitle(bar, title, state, flags, a, b, ctx, orientation);
+}
+
+// MenuBarInstance::CopyGlobalSettings: makes (once) and draws the full-screen
+// menu bars' Apple window.
+static CFDictionaryRef GreenFullscreen_CopyGlobalSettings(void *unused)
+{
+    BOOL outer = gDrawingAppleWindow;
+    gDrawingAppleWindow = YES;
+    CFDictionaryRef settings = orig_CopyGlobalSettings(unused);
+    gDrawingAppleWindow = outer;
+    return settings;
+}
+
+static void GreenFullscreen_DrawOnce(void *view, CGRect bar, CGRect dirty, bool c, bool opaque, bool e, bool f, CGContextRef ctx)
+{
+    BOOL outerDrawing = gDrawingMenuBar, outerDrew = gDrewAppleMenuTitle;
+    gDrawingMenuBar = YES;
+    gDrewAppleMenuTitle = NO;
+    orig_DrawOnce(view, bar, dirty, c, opaque, e, f, ctx);
+    if (GreenFullscreenShowsExitButton(view) && !gDrewAppleMenuTitle) {
+        CGRect title = CGRectNull;
+        GreenFullscreenGetTitleBounds(view, 0, &title);     // the Apple menu comes first
+        if (!CGRectIsEmpty(title) && CGRectIntersectsRect(title, dirty))
+            orig_HIThemeDrawAppleMenuTitle(&bar, &title, 0, f, NULL, NULL, ctx, kHIThemeOrientationNormal);
+    }
+    gDrawingMenuBar = outerDrawing;
+    gDrewAppleMenuTitle = outerDrew;
+}
+
+// Leaving full screen: the full-screen window on the display that was clicked
+// (HIToolbox would ask NSApp to leave full screen on every display).
+static void GreenFullscreen_HIExitFullScreenMode(void)
+{
+    NSPoint mouse = [NSEvent mouseLocation];
+    for (NSScreen *screen in [NSScreen screens]) {
+        if (!NSMouseInRect(mouse, [screen frame], NO)) continue;
+        NSWindow *window = GreenFullscreenWindowOnDisplay(GreenFullscreenDisplayID(screen));
+        if (window) {
+            [window toggleFullScreen:nil];
+            return;
+        }
+    }
+    orig_HIExitFullScreenMode();
+}
+
+// The menu bar redraws when the app comes to or goes from a full-screen space,
+// but not always when that space's window leaves full screen or the screens
+// change: lay it out and draw it again then.
+static void GreenFullscreenUpdateMenuBar(void)
+{
+    GreenFullscreenInvalMenuBarLayout();
+    DrawMenuBar();
+}
+
+static BOOL GreenFullscreenMoveExitButton(void)
+{
+    typedef void (*HookFn)(void *symbol, void *replacement, void **original);
+    typedef const void *(*GetImageFn)(const char *path);
+    typedef void *(*FindSymbolFn)(const void *image, const char *name);
+    HookFn hookFunction = (HookFn)dlsym(RTLD_DEFAULT, "MSHookFunction");
+    GetImageFn getImage = (GetImageFn)dlsym(RTLD_DEFAULT, "MSGetImageByName");
+    FindSymbolFn find = (FindSymbolFn)dlsym(RTLD_DEFAULT, "MSFindSymbol");
+    const void *hitoolbox = getImage ? getImage("/System/Library/Frameworks/Carbon.framework/Versions/A/Frameworks/HIToolbox.framework/Versions/A/HIToolbox") : NULL;
+    if (!hookFunction || !find || !hitoolbox) {
+        NSLog(@"GreenFullscreen: the exit full screen button stays on the right (no MSHookFunction, MSFindSymbol or HIToolbox).");
+        return NO;
+    }
+    void *ensureBarLayout = find(hitoolbox, "__ZN13HIMenuBarView15EnsureBarLayoutEv");
+    void *drawOnce = find(hitoolbox, "__ZN13HIMenuBarView8DrawOnceE6CGRectS0_bbbbP9CGContext");
+    const uint8_t *getPartBounds = find(hitoolbox, "__ZN13HIMenuBarView17GetPartBoundsSelfEsP6CGRect");
+    void *drawAppleMenuTitle = find(hitoolbox, "__HIThemeDrawAppleMenuTitle");
+    void *copyGlobalSettings = find(hitoolbox, "__ZN15MenuBarInstance18CopyGlobalSettingsEv");
+    void *exitFullScreenMode = find(hitoolbox, "_HIExitFullScreenMode");
+#if __LP64__
+    gFullScreenAppleWindow = find(hitoolbox, "__ZZL36GetFullScreenMenuBarAuxiliaryWindowsPjS_dE12sAppleWindow");
+#else
+    gFullScreenAppleWindow = find(hitoolbox, "__ZZL36GetFullScreenMenuBarAuxiliaryWindowsPjS_fE12sAppleWindow");
+#endif
+    GreenFullscreenInvalMenuBarLayout = (GreenFullscreenVoidFn)find(hitoolbox, "_InvalMenuBarLayout");
+    GreenFullscreenHIViewGetWindowRef = (GreenFullscreenGetWindowRefFn)find(hitoolbox, "__ZN6HIView12GetWindowRefEv");
+    GreenFullscreenGetTitleBounds = (GreenFullscreenGetTitleBoundsFn)find(hitoolbox, "__ZN13HIMenuBarView14GetTitleBoundsEiP6CGRect");
+    gExitButtonFlag = getPartBounds ? GreenFullscreenFindExitButtonFlag(getPartBounds) : -1;
+    Class transition = ZKClass(_NSFullScreenTransition);
+    if (!ensureBarLayout || !drawOnce || gExitButtonFlag < 0 || !drawAppleMenuTitle || !copyGlobalSettings || !exitFullScreenMode || !gFullScreenAppleWindow
+        || !GreenFullscreenInvalMenuBarLayout || !GreenFullscreenHIViewGetWindowRef || !GreenFullscreenGetTitleBounds
+        || !transition || !class_getInstanceMethod(transition, @selector(makeExitFullScreenStatusItem))) {
+        NSLog(@"GreenFullscreen: the exit full screen button stays on the right (HIToolbox's menu bar or AppKit's full-screen status item is not as expected).");
+        return NO;
+    }
+    hookFunction(ensureBarLayout, (void *)GreenFullscreen_EnsureBarLayout, (void **)&orig_EnsureBarLayout);
+    hookFunction(drawOnce, (void *)GreenFullscreen_DrawOnce, (void **)&orig_DrawOnce);
+    hookFunction(drawAppleMenuTitle, (void *)GreenFullscreen_HIThemeDrawAppleMenuTitle, (void **)&orig_HIThemeDrawAppleMenuTitle);
+    hookFunction(copyGlobalSettings, (void *)GreenFullscreen_CopyGlobalSettings, (void **)&orig_CopyGlobalSettings);
+    hookFunction(exitFullScreenMode, (void *)GreenFullscreen_HIExitFullScreenMode, (void **)&orig_HIExitFullScreenMode);
+    gExitButtonOnLeft = YES;
+
+    // The Apple window was most likely made and drawn as the app launched.
+    if (*gFullScreenAppleWindow) {
+        CGContextRef ctx = CGWindowContextCreate(CGSMainConnectionID(), *gFullScreenAppleWindow, NULL);
+        if (ctx) {
+            CGContextClearRect(ctx, CGRectMake(0, 0, 10000, 10000));
+            CGContextFlush(ctx);
+            CGContextRelease(ctx);
+        }
+    }
+
+    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+    for (NSString *name in @[NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification, NSApplicationDidChangeScreenParametersNotification])
+        [center addObserverForName:name object:nil queue:nil usingBlock:^(NSNotification *note) { GreenFullscreenUpdateMenuBar(); }];
+    [[[NSWorkspace sharedWorkspace] notificationCenter] addObserverForName:NSWorkspaceActiveSpaceDidChangeNotification object:nil queue:nil
+                                                                usingBlock:^(NSNotification *note) { GreenFullscreenUpdateMenuBar(); }];
+    return YES;
+}
+
+@interface GreenFullscreen__NSFullScreenTransition : NSObject
+@end
+
+@implementation GreenFullscreen__NSFullScreenTransition
+
+- (void)makeExitFullScreenStatusItem
+{
+    if (!gExitButtonOnLeft) ZKOrig(void);
+}
+
+@end
 
 #pragma mark - Hooks
 
@@ -303,6 +580,10 @@ static BOOL GreenFullscreenIsOurZoomButton(NSView *view)
     typedef void (*HookFn)(void *symbol, void *replacement, void **original);
     HookFn hookFunction = (HookFn)dlsym(RTLD_DEFAULT, "MSHookFunction");
     void *cuiDraw = dlsym(RTLD_DEFAULT, "CUIDraw");
+    if (!hookFunction || !cuiDraw) {
+        NSLog(@"GreenFullscreen: the zoom button keeps its + and the exit full screen button stays on the right (no MSHookFunction or CUIDraw).");
+        return;
+    }
     NSBundle *bundle = [NSBundle bundleForClass:self];
     for (int x2 = 0; x2 < 2; x2++) {
         NSURL *url = [bundle URLForResource:x2 ? @"FullScreenEnterGlyph@2x" : @"FullScreenEnterGlyph" withExtension:@"png"];
@@ -311,13 +592,13 @@ static BOOL GreenFullscreenIsOurZoomButton(NSView *view)
         gArrows[x2] = CGImageSourceCreateImageAtIndex(source, 0, NULL);
         CFRelease(source);
     }
-    if (!hookFunction || !cuiDraw || !gArrows[0] || !gArrows[1]) {
-        NSLog(@"GreenFullscreen: the zoom button keeps its + (%@).", (!hookFunction || !cuiDraw) ? @"no MSHookFunction or CUIDraw" : @"the bundle's arrows are missing");
-        return;
-    }
+    BOOL arrows = gArrows[0] && gArrows[1];
+    if (!arrows) NSLog(@"GreenFullscreen: the zoom button keeps its + (the bundle's arrows are missing).");
+    if (GreenFullscreenMoveExitButton()) ZKSwizzle(GreenFullscreen__NSFullScreenTransition, _NSFullScreenTransition);
+    if (!arrows && !gExitButtonOnLeft) return;
     gArtCache = [[NSMutableDictionary alloc] init];
     hookFunction(cuiDraw, (void *)GreenFullscreen_CUIDraw, (void **)&orig_CUIDraw);
-    ZKSwizzle(GreenFullscreen_NSThemeWidgetCell, _NSThemeWidgetCell);
+    if (arrows) ZKSwizzle(GreenFullscreen_NSThemeWidgetCell, _NSThemeWidgetCell);
 }
 
 + (void)load
