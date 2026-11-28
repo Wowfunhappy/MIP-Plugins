@@ -510,8 +510,64 @@ static BOOL sl_canSmoothFontsInLayer(id self, SEL _cmd)
     return NO;
 }
 
+// Safari (7) titles its windows with a text field of its own
+// (WindowChromeBackgroundTextField): in a layer it paints the title bar
+// behind itself (-[BrowserWindow _drawBackgroundForCellWithRect:inView:],
+// so with LCD smoothing), then draws the title with the raised background
+// style - lighter than 10.6's, and dimmed in an inactive window by AppKit.
+// Its text is drawn as AppKit's titles are above: 10.6's colour for the
+// window's state, its shadow, the plain style, no LCD smoothing. (Drawn with a
+// copy of its cell, detached from the field, so the field's alignment and
+// truncation are kept and changing the copy doesn't ask for another display.)
+static void (*orig_safariTitleDrawRect)(id, SEL, NSRect);
+
+static void sl_safariTitleDrawRect(NSTextField *self, SEL _cmd, NSRect rect)
+{
+    NSWindow *window = [self window];
+    NSView *frame = [[window contentView] superview];
+    NSTextFieldCell *cell = [self cell];
+    NSAttributedString *title = [cell attributedStringValue];
+    NSColor *color = [title length] ? [title attribute:NSForegroundColorAttributeName atIndex:0 effectiveRange:NULL] : nil;
+    BOOL black = color && [[color colorUsingColorSpaceName:NSCalibratedWhiteColorSpace] whiteComponent] == 0
+              && [color alphaComponent] == 1;
+    if (!window || !black || ![cell isKindOfClass:[NSTextFieldCell class]] || (frame && SLFrameHasCustomAppearance(frame))) {
+        orig_safariTitleDrawRect(self, _cmd, rect);
+        return;
+    }
+
+    if ([self layer] && [window respondsToSelector:sel_registerName("_drawBackgroundForCellWithRect:inView:")])
+        ((void (*)(id, SEL, NSRect, id))objc_msgSend)(window, sel_registerName("_drawBackgroundForCellWithRect:inView:"), [self bounds], self);
+
+    static NSShadow *shadow;
+    if (!shadow) {
+        shadow = [[NSShadow alloc] init];
+        [shadow setShadowColor:[NSColor colorWithCalibratedWhite:1 alpha:0.4]];
+        [shadow setShadowOffset:NSMakeSize(0, -1)];
+        [shadow setShadowBlurRadius:0];
+    }
+    NSMutableAttributedString *styled = [[title mutableCopy] autorelease];
+    NSRange all = NSMakeRange(0, [styled length]);
+    BOOL active = [window isKeyWindow] || [window isMainWindow];
+    [styled addAttribute:NSForegroundColorAttributeName value:active ? [NSColor blackColor] : [NSColor colorWithCalibratedWhite:0 alpha:0.63] range:all];
+    [styled addAttribute:NSShadowAttributeName value:shadow range:all];
+
+    NSTextFieldCell *copy = [[cell copy] autorelease];
+    [copy setControlView:nil];
+    [copy setBackgroundStyle:NSBackgroundStyleLight];
+    [copy setAttributedStringValue:styled];
+    CGContextRef ctx = (CGContextRef)[[NSGraphicsContext currentContext] graphicsPort];
+    if (ctx) { CGContextSaveGState(ctx); CGContextSetShouldSmoothFonts(ctx, false); }
+    [copy drawWithFrame:[self bounds] inView:self];
+    if (ctx) CGContextRestoreGState(ctx);
+}
+
 static void SLHookTitle(void)
 {
+    Class safariTitle = NSClassFromString(@"WindowChromeBackgroundTextField");
+    Method safariDraw = safariTitle ? class_getInstanceMethod(safariTitle, @selector(drawRect:)) : NULL;
+    if (safariDraw && [safariTitle isSubclassOfClass:[NSTextField class]])
+        orig_safariTitleDrawRect = (void *)method_setImplementation(safariDraw, (IMP)sl_safariTitleDrawRect);
+
     Class field = NSClassFromString(@"NSThemeFrameTitleTextField");
     Method smooth = field ? class_getInstanceMethod(field, sel_registerName("canSmoothFontsInLayer")) : NULL;
     if (smooth && strncmp(method_getTypeEncoding(smooth), "c", 1) == 0)
