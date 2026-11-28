@@ -24,7 +24,7 @@
 //  are laid out the same in both.
 //
 //  Title: 10.6 drew it in black (black at 63% opacity in an inactive window),
-//  with a white shadow one point below and without LCD font smoothing.
+//  with a white shadow one point below.
 //
 //  Title bar: 10.6 fills it with CUIRenderer::CreateGrayCubicGradientImage,
 //      v(t) = s + D(t^3 - 1.5t^2 - 0.5t),  D = s - e,
@@ -487,27 +487,16 @@ static id sl_titleString(id self, SEL _cmd)
 
 // Mavericks draws the title with its cell's "raised" background style, which
 // it renders with less contrast than 10.6 did; 10.6's raised look is just the
-// shadow added above. Draw with the plain style and no LCD smoothing.
+// shadow added above. Draw with the plain style.
 static void sl_drawTitle(id self, SEL _cmd, NSRect rect, id color)
 {
     NSCell *cell = [self respondsToSelector:@selector(titleCell)] ? [self performSelector:@selector(titleCell)] : nil;
     BOOL restyle = [cell respondsToSelector:@selector(setBackgroundStyle:)] && [cell backgroundStyle] == NSBackgroundStyleRaised
-                && [color isKindOfClass:[NSColor class]] && ![color isEqual:[NSColor whiteColor]];
-    if (SLFrameHasCustomAppearance(self)) { orig_drawTitle(self, _cmd, rect, color); return; }
-    CGContextRef ctx = (CGContextRef)[[NSGraphicsContext currentContext] graphicsPort];
-    if (ctx) { CGContextSaveGState(ctx); CGContextSetShouldSmoothFonts(ctx, false); }
+                && [color isKindOfClass:[NSColor class]] && ![color isEqual:[NSColor whiteColor]]
+                && !SLFrameHasCustomAppearance(self);
     if (restyle) [cell setBackgroundStyle:NSBackgroundStyleLight];
     orig_drawTitle(self, _cmd, rect, color);
     if (restyle) [cell setBackgroundStyle:NSBackgroundStyleRaised];
-    if (ctx) CGContextRestoreGState(ctx);
-}
-
-// In layer-backed windows the title is a separate text field, which paints
-// Mavericks' own title bar behind the text so it can use LCD smoothing; 10.6
-// titles are not LCD smoothed, so let it draw just the text.
-static BOOL sl_canSmoothFontsInLayer(id self, SEL _cmd)
-{
-    return NO;
 }
 
 // Safari (7) titles its windows with a text field of its own
@@ -516,7 +505,7 @@ static BOOL sl_canSmoothFontsInLayer(id self, SEL _cmd)
 // so with LCD smoothing), then draws the title with the raised background
 // style - lighter than 10.6's, and dimmed in an inactive window by AppKit.
 // Its text is drawn as AppKit's titles are above: 10.6's colour for the
-// window's state, its shadow, the plain style, no LCD smoothing. (Drawn with a
+// window's state, its shadow, the plain style. (Drawn with a
 // copy of its cell, detached from the field, so the field's alignment and
 // truncation are kept and changing the copy doesn't ask for another display.)
 static void (*orig_safariTitleDrawRect)(id, SEL, NSRect);
@@ -555,10 +544,7 @@ static void sl_safariTitleDrawRect(NSTextField *self, SEL _cmd, NSRect rect)
     [copy setControlView:nil];
     [copy setBackgroundStyle:NSBackgroundStyleLight];
     [copy setAttributedStringValue:styled];
-    CGContextRef ctx = (CGContextRef)[[NSGraphicsContext currentContext] graphicsPort];
-    if (ctx) { CGContextSaveGState(ctx); CGContextSetShouldSmoothFonts(ctx, false); }
     [copy drawWithFrame:[self bounds] inView:self];
-    if (ctx) CGContextRestoreGState(ctx);
 }
 
 static void SLHookTitle(void)
@@ -567,11 +553,6 @@ static void SLHookTitle(void)
     Method safariDraw = safariTitle ? class_getInstanceMethod(safariTitle, @selector(drawRect:)) : NULL;
     if (safariDraw && [safariTitle isSubclassOfClass:[NSTextField class]])
         orig_safariTitleDrawRect = (void *)method_setImplementation(safariDraw, (IMP)sl_safariTitleDrawRect);
-
-    Class field = NSClassFromString(@"NSThemeFrameTitleTextField");
-    Method smooth = field ? class_getInstanceMethod(field, sel_registerName("canSmoothFontsInLayer")) : NULL;
-    if (smooth && strncmp(method_getTypeEncoding(smooth), "c", 1) == 0)
-        class_replaceMethod(field, sel_registerName("canSmoothFontsInLayer"), (IMP)sl_canSmoothFontsInLayer, method_getTypeEncoding(smooth));
 
     Class frame = NSClassFromString(@"NSThemeFrame");
     Method color = class_getInstanceMethod(frame, sel_registerName("_currentTitleColor"));
